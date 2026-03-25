@@ -1,0 +1,8 @@
+[    6610ms] TypeError: Cannot read properties of null (reading 'hp')
+    at new Player (http://localhost:8765/index.html:339:23)
+    at startGame (http://localhost:8765/index.html:1563:12)
+    at eval (eval at evaluate (:301:30), <anonymous>:5:7)
+[   63154ms] TypeError: Cannot read properties of null (reading 'hp')
+    at new Player (http://localhost:8765/index.html:339:23)
+    at startGame (http://localhost:8765/index.html:1563:12)
+    at eval (eval at evaluate (:301:30), <anonymous>:4:7)

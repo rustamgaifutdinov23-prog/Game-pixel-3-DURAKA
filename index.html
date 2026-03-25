@@ -1,0 +1,1313 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ТРИ ДУРАКА: Pixel Brawler</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#000; display:flex; justify-content:center; align-items:center; min-height:100vh; overflow:hidden; font-family:'Courier New',monospace; }
+canvas { display:block; cursor:crosshair; }
+</style>
+</head>
+<body>
+<canvas id="C"></canvas>
+<script>
+// ═══════════════════════════════════════════════════
+//  ТРИ ДУРАКА: Pixel Brawler  v2.0  (VS/Brotato edition)
+// ═══════════════════════════════════════════════════
+const C = document.getElementById('C');
+const ctx = C.getContext('2d');
+C.width = 800; C.height = 600;
+function resize() {
+  const s = Math.min(window.innerWidth/800, window.innerHeight/600);
+  C.style.width=(800*s)+'px'; C.style.height=(600*s)+'px';
+}
+resize(); window.addEventListener('resize', resize);
+
+// ─── INPUT ───────────────────────────────────────
+const keys = new Set();
+window.addEventListener('keydown', e => { keys.add(e.code); e.preventDefault(); });
+window.addEventListener('keyup',   e => keys.delete(e.code));
+let mx=400, my=300, mclk=false;
+C.addEventListener('mousemove', e => {
+  const r=C.getBoundingClientRect(), sx=C.width/r.width;
+  mx=(e.clientX-r.left)*sx; my=(e.clientY-r.top)*sx;
+});
+C.addEventListener('click', ()=>mclk=true);
+
+// ─── CONSTANTS ───────────────────────────────────
+const TW=32, MW=64, MH=64, PW=MW*TW, PH=MH*TW;
+const TILE_COLORS=['#3a7d44','#8b6914','#777','#2d5a1b','#1a4a8a','#4a6b2a'];
+const TILE_SOLID =[false,false,false,true,true,false];
+
+// ─── STATE ───────────────────────────────────────
+let STATE='TITLE'; // TITLE|SELECT|GAME|LEVELUP|GAMEOVER|WIN
+let selectedChar=null, player=null;
+let monsters=[], projectiles=[], gems=[], effects=[], particles=[], floats=[];
+let cam={x:0,y:0}, tilemap=[];
+let kills=0, score=0, wave=1, waveTimer=0, gameTime=0;
+let bossSpawned=false, bossAlive=false;
+let spawnTimer=0, regenTimer=0;
+let pendingUpgrades=[], titleAnim=0, selAnim=0;
+let auraTimer=0;
+
+// ─── SPRITES ─────────────────────────────────────
+const imgs={};
+let loaded=0, total=8;
+
+function removeWhite(img, w, h, sx, sy, sw, sh) {
+  // Creates offscreen canvas with one quadrant, white removed
+  const oc=document.createElement('canvas');
+  oc.width=w; oc.height=h;
+  const ox=oc.getContext('2d');
+  ox.drawImage(img, sx, sy, sw, sh, 0, 0, w, h);
+  const id=ox.getImageData(0,0,w,h), d=id.data;
+  for (let i=0;i<d.length;i+=4) {
+    if (d[i]>220 && d[i+1]>220 && d[i+2]>220) d[i+3]=0;
+  }
+  ox.putImageData(id,0,0);
+  return oc;
+}
+
+function buildSpritesheet(img, fw, fh) {
+  // Process 2×2 spritesheet removing white bg, return processed canvas
+  const oc=document.createElement('canvas');
+  oc.width=fw*2; oc.height=fh*2;
+  const ox=oc.getContext('2d');
+  ox.drawImage(img, 0, 0, img.width, img.height, 0, 0, fw*2, fh*2);
+  const id=ox.getImageData(0,0,oc.width,oc.height), d=id.data;
+  for (let i=0;i<d.length;i+=4) {
+    if (d[i]>220 && d[i+1]>220 && d[i+2]>220) d[i+3]=0;
+  }
+  ox.putImageData(id,0,0);
+  return oc;
+}
+
+function loadImg(key, src, process) {
+  const im=new Image();
+  im.onload=()=>{
+    if (process==='sprite') imgs[key]=buildSpritesheet(im,24,32);
+    else if (process==='enemy') imgs[key]=buildSpritesheet(im,40,54);
+    else imgs[key]=im;
+    loaded++;
+  };
+  im.onerror=()=>loaded++;
+  im.src=src;
+}
+
+loadImg('p1sel','characters/player1_select.png','');
+loadImg('p2sel','characters/player2_select.png','');
+loadImg('p3sel','characters/player3_select.png','');
+loadImg('p1spr','characters/player1_sprite.png','sprite');
+loadImg('p2spr','characters/player2_sprite.png','sprite');
+loadImg('p3spr','characters/player3_sprite.png','sprite');
+loadImg('e1',   'characters/enemy1.png','enemy');
+loadImg('e2',   'characters/enemy2.png','enemy');
+
+// ─── HELPERS ─────────────────────────────────────
+const dist=(x1,y1,x2,y2)=>Math.sqrt((x2-x1)**2+(y2-y1)**2);
+const rnd=arr=>arr[Math.floor(Math.random()*arr.length)];
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+const lerp=(a,b,t)=>a+(b-a)*t;
+function angleToDir(a) {
+  const n=((a%(Math.PI*2))+Math.PI*2)%(Math.PI*2);
+  if (n<Math.PI*0.25||n>=Math.PI*1.75) return 'right';
+  if (n<Math.PI*0.75) return 'down';
+  if (n<Math.PI*1.25) return 'left';
+  return 'up';
+}
+function dirToFrame(dir, fw, fh) {
+  return { down:[0,0,fw,fh], up:[fw,0,fw,fh], left:[0,fh,fw,fh], right:[fw,fh,fw,fh] }[dir]||[0,0,fw,fh];
+}
+function isSolid(wx,wy) {
+  const tx=Math.floor(wx/TW), ty=Math.floor(wy/TW);
+  if (tx<0||ty<0||tx>=MW||ty>=MH) return true;
+  return TILE_SOLID[tilemap[ty][tx]]||false;
+}
+function addFloat(x,y,txt,col,dur=1800) { floats.push({x,y,txt,col,timer:dur,maxT:dur,vy:-0.4}); }
+function burst(x,y,col,n=10) {
+  for (let i=0;i<n;i++) {
+    const a=Math.random()*Math.PI*2, s=1+Math.random()*3;
+    particles.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,col,life:500+Math.random()*300,ml:800});
+  }
+}
+function findNearest(x,y,maxR=9999) {
+  let best=null, bd=maxR;
+  for (const m of monsters) {
+    if (m.dead) continue;
+    const d=dist(x,y,m.x,m.y);
+    if (d<bd) { bd=d; best=m; }
+  }
+  return best;
+}
+
+// ─── MAP ─────────────────────────────────────────
+function genMap() {
+  tilemap=[];
+  for (let y=0;y<MH;y++) { tilemap[y]=[]; for (let x=0;x<MW;x++) tilemap[y][x]=0; }
+  for (let i=0;i<60;i++) {
+    const px=2+Math.floor(Math.random()*(MW-4)), py=2+Math.floor(Math.random()*(MH-4));
+    const rw=2+Math.floor(Math.random()*7), rh=2+Math.floor(Math.random()*7);
+    for (let dy=0;dy<rh;dy++) for (let dx=0;dx<rw;dx++)
+      if (py+dy<MH&&px+dx<MW) tilemap[py+dy][px+dx]=1;
+  }
+  for (let i=0;i<3;i++) {
+    const sy=Math.floor(MH/4)*(i+1);
+    for (let x=0;x<MW;x++) if (sy<MH) tilemap[sy][x]=2;
+  }
+  for (let i=0;i<120;i++) {
+    const tx=2+Math.floor(Math.random()*(MW-4)), ty=2+Math.floor(Math.random()*(MH-4));
+    if (Math.abs(tx-MW/2)>5||Math.abs(ty-MH/2)>5) tilemap[ty][tx]=3;
+  }
+  for (let i=0;i<4;i++) {
+    const wx=5+Math.floor(Math.random()*(MW-10)), wy=5+Math.floor(Math.random()*(MH-10));
+    for (let dy=0;dy<4;dy++) for (let dx=0;dx<5;dx++)
+      if (wy+dy<MH&&wx+dx<MW) tilemap[wy+dy][wx+dx]=4;
+  }
+  const cx=Math.floor(MW/2), cy=Math.floor(MH/2);
+  for (let dy=-4;dy<=4;dy++) for (let dx=-4;dx<=4;dx++) {
+    if (cy+dy>=0&&cy+dy<MH&&cx+dx>=0&&cx+dx<MW) tilemap[cy+dy][cx+dx]=1;
+  }
+  // Easter egg toilet
+  tilemap[5][5]=3; tilemap[5][6]=3; tilemap[6][5]=3; tilemap[6][6]=3;
+}
+
+function drawTiles() {
+  ctx.imageSmoothingEnabled=false;
+  const sx=Math.floor(cam.x/TW), sy=Math.floor(cam.y/TW);
+  const ex=Math.min(MW,sx+Math.ceil(C.width/TW)+2), ey=Math.min(MH,sy+Math.ceil(C.height/TW)+2);
+  for (let ty=sy;ty<ey;ty++) for (let tx=sx;tx<ex;tx++) {
+    const t=tilemap[ty][tx];
+    const px=tx*TW-cam.x, py=ty*TW-cam.y;
+    ctx.fillStyle=TILE_COLORS[t]||'#3a7d44';
+    ctx.fillRect(px,py,TW,TW);
+    if (t===0||t===1) { ctx.strokeStyle='rgba(0,0,0,0.06)'; ctx.lineWidth=0.5; ctx.strokeRect(px,py,TW,TW); }
+    if (t===3) {
+      ctx.fillStyle='#1a3a0a'; ctx.beginPath();
+      ctx.moveTo(px+TW/2,py+4); ctx.lineTo(px+TW-4,py+TW-4); ctx.lineTo(px+4,py+TW-4); ctx.closePath(); ctx.fill();
+      ctx.fillStyle='#0d2005'; ctx.fillRect(px+TW/2-3,py+TW-8,6,8);
+    }
+    if (t===4) { ctx.fillStyle=`rgba(100,180,255,${0.2+Math.sin(gameTime*.002+tx+ty)*.1})`; ctx.fillRect(px,py,TW,TW); }
+    if (ty>=5&&ty<=6&&tx>=5&&tx<=6) { ctx.font='20px serif'; ctx.textAlign='center'; ctx.fillText('🚽',px+TW/2,py+TW-4); }
+  }
+}
+
+// ─── CHARS CONFIG ─────────────────────────────────
+const CHARS=[
+  { id:'gpu', name:'Видюха', full:'Вася "GPU" Петров', quote:'RTX ON, мозги OFF',
+    color:'#00ff88', selKey:'p1sel', sprKey:'p1spr', hp:80, spd:2.8, dmg:25,
+    statsText:['❤ HP: 80','⚡ Скорость: 3','💥 Урон: 25','🎯 Дальний'],
+    abDesc:['[E] BSoD — оглушение всех','[Q] Mining Farm — 3 турели','[Spc] Рывок (i-frames)'],
+    passive:'Пассивка: +20% урон боссам',
+    abilQ:{skill:['СИНИЙ ЭКРАН!','BSoD!!!','CRITICAL_ERROR.exe'],ult:['MINING FARM!','ETH to moon!','Крипта растёт!'],atk:['На держи!','GPU лети!','RTX 5090!']}
+  },
+  { id:'hipster', name:'Бородач', full:'Жека "Органик" Бородин', quote:'Это было круто до мейнстрима',
+    color:'#ff8844', selKey:'p2sel', sprKey:'p2spr', hp:70, spd:3.5, dmg:20,
+    statsText:['❤ HP: 70','⚡ Скорость: 4','💥 Урон: 20','🌀 Средний'],
+    abDesc:['[E] Organic coffee — замедление','[Q] Vinyl Record — большой AOE','[Spc] Рывок (i-frames)'],
+    passive:'Пассивка: +25% монет',
+    abilQ:{skill:['Specialty!','Oat milk!','Третья волна!'],ult:['VINYL!','До тебя это было модно!','B-side!'],atk:['Авокадо!','Без глютена!','Органик!']}
+  },
+  { id:'ginger', name:'Рыжий', full:'Бориска "СПОРТ СПОРТ"', quote:'Это пропуск в качалку?',
+    color:'#ff4422', selKey:'p3sel', sprKey:'p3spr', hp:120, spd:2.3, dmg:40,
+    statsText:['❤ HP: 120','⚡ Скорость: 2','💥 Урон: 40','👊 Ближний'],
+    abDesc:['[E] Протеин — +спид/дамаг','[Q] СПОРТ! берсерк 4 сек','[Spc] Рывок (i-frames)'],
+    passive:'Пассивка: 20% блок + контратака',
+    abilQ:{skill:['ПРОТЕИН!','КАЗЕИН!','ШЕЙКЕР!'],ult:['СПОРТ!!!','БЕРСЕРК!','ЗА ПРОПУСК!'],atk:['АААА!','ДЕРЖИ!','СПОРТ!']}
+  }
+];
+
+// ─── UPGRADES ─────────────────────────────────────
+const UPGRADE_POOL=[
+  {id:'dmg',   icon:'💥', name:'+30% Урон',         desc:'Все атаки больнее',       apply:p=>{ p.dmg=Math.floor(p.dmg*1.3); }},
+  {id:'hp',    icon:'❤️', name:'+50 HP макс',         desc:'Больше жизней',           apply:p=>{ p.maxHp+=50; p.hp=Math.min(p.hp+50,p.maxHp); }},
+  {id:'spd',   icon:'⚡', name:'+20% Скорость',       desc:'Быстрее ног нет',         apply:p=>{ p.spd*=1.2; }},
+  {id:'atkspd',icon:'🔥', name:'+35% Скорость атаки', desc:'Бьёшь чаще',              apply:p=>{ p.autoAtkCd=Math.floor(p.autoAtkCd*0.65); }},
+  {id:'regen', icon:'💊', name:'Регенерация +3/сек',  desc:'Живёшь дольше',           apply:p=>{ p.regen=(p.regen||0)+3; }},
+  {id:'magnet',icon:'🧲', name:'Магнит опыта ×2',     desc:'Притягивает XP',          apply:p=>{ p.magnet=(p.magnet||100)*2; }},
+  {id:'proj',  icon:'🎯', name:'+1 Снаряд',           desc:'Стреляешь ещё разок',     apply:p=>{ p.extraProj=(p.extraProj||0)+1; }},
+  {id:'armor', icon:'🛡️', name:'+6 Броня',            desc:'Меньше урона получаешь',  apply:p=>{ p.armor=(p.armor||0)+6; }},
+  {id:'aura',  icon:'🌀', name:'Аура урона',           desc:'Повреждает вокруг тебя',  apply:p=>{ p.auraDmg=(p.auraDmg||0)+12; }},
+  {id:'heal',  icon:'🍎', name:'Лечение +40 HP',       desc:'Сразу восстанавливает',   apply:p=>{ p.hp=Math.min(p.hp+40,p.maxHp); }},
+  {id:'range', icon:'📏', name:'+50% Дальность',       desc:'Снаряды летят дальше',    apply:p=>{ p.atkRange=Math.floor((p.atkRange||300)*1.5); }},
+  {id:'crit',  icon:'⚡', name:'Крит 25%',             desc:'Шанс двойного урона',     apply:p=>{ p.critChance=(p.critChance||0)+0.25; }},
+];
+function getRandUpgrades(n=3) {
+  const pool=[...UPGRADE_POOL];
+  const res=[];
+  while (res.length<n&&pool.length>0) {
+    const idx=Math.floor(Math.random()*pool.length);
+    res.push(pool.splice(idx,1)[0]);
+  }
+  return res;
+}
+
+// ─── HUMOR ───────────────────────────────────────
+const MOM_JOKES=[
+  'Твоя мама такая большая — Гугл Мэпс показывает её на двух экранах 🗺️',
+  'Твоя мама такая старая — динозавры ей говорили "Молодёжь нынче..."',
+  'Твоя мама такая ленивая — даже её тень лежит',
+  'Твоя мама такая шумная — у соседей кончились беруши',
+  'Твоя мама такая медленная — Сопля обогнала её ТРИЖДЫ',
+  'Твоя мама такая горячая — видеокарта завидует (это комплимент)',
+  'Твоя мама такая добрая — даже Карен её боится',
+  'Твоя мама такая глупая — ставит лайки по телику голосом',
+  'Твоя мама видела первый Шрек в кино. Дважды.',
+  'Твоя мама подписана на страницу Карен. Они дружат.',
+];
+const KILL_QUOTES=[
+  '💀 +очки! (маме монстра соболезнования)',
+  '😂 Убит быстрее чем Симба потерял папу',
+  '🏆 GG EZ — Картман где-то плачет',
+  '🧅 Лук горит... как в мультике про Шрека',
+  '🚀 Buzz Lightyear: "К бесконечности и провалу"',
+  '😱 Гомер Симпсон: "D\'oh!"',
+  '🦴 Кости рассыпались — нужен суп',
+  '🍔 Губка Боб больше не готовит для этого',
+  '😤 Рик: "Смотрел бы сериал — жил бы"',
+  '💩 Туалетная кабинка плачет',
+  '🎮 FATALITY! К. О.!',
+  '🧠 Хотел мозгов — получил кулак',
+];
+const LEVEL_QUOTES=['⬆️ УРОВЕНЬ! Мама гордилась бы... наверное','⬆️ ПРОКАЧАЛСЯ!','⬆️ ЛУЧШЕ, ЧЕМ ВЧЕРА!','⬆️ ГДЕ ПРОТЕИН?!'];
+const TOILET_JOKES=['🚽 Туалетная кабинка в углу — символ всей жизни','💩 100% монстров умирают после встречи с тобой','🧻 Бумага кончается быстрее чем враги'];
+
+// ─── MONSTER TYPES ───────────────────────────────
+const MTYPES=[
+  {id:'e1',   name:'Братан',     sprKey:'e1',   col:'#8B4513', sz:22, hp:40,  dmg:12, spd:1.4, xp:8,
+   dq:['Братуха...','За что?!','Мама не знает...','Пацаны не поймут','Не по понятиям!']},
+  {id:'e2',   name:'Вейпер',     sprKey:'e2',   col:'#22aa44', sz:20, hp:30,  dmg:8,  spd:1.8, xp:6,
+   dq:['Облако рассеялось...','Вейп упал...','Последняя затяжка...','Батарейка кончилась','Аромат ушёл...']},
+  {id:'goblin',name:'Гоблин Петька',sprKey:null, col:'#44aa22', sz:18, hp:25,  dmg:8,  spd:1.6, xp:5,
+   dq:['Мамааааа...','Это не по правилам!','Аааааах!','Не фэйр!','Мама помоги!']},
+  {id:'slime', name:'Сопля',     sprKey:null,   col:'#88dd44', sz:16, hp:18,  dmg:5,  spd:0.9, xp:4,
+   dq:['Буль...','Хлюп...','Шмяк.','Как мама по утрам','Растворился']},
+  {id:'skeleton',name:'Дед Костян',sprKey:null, col:'#ffffbb', sz:20, hp:50,  dmg:14, spd:1.1, xp:18,
+   dq:['Суп не ел...','Кальций не помог','Рассыпался как пенсия','Остеопороз','Ешь суп!']},
+  {id:'orc',   name:'Шрек',      sprKey:null,   col:'#228822', sz:28, hp:80,  dmg:20, spd:0.9, xp:28,
+   dq:['Болото... мой дом...','Осёл предал...','Это слои лука','Фарквааад...']},
+  {id:'zombie',name:'Зомби Крис',sprKey:null,   col:'#557755', sz:22, hp:55,  dmg:16, spd:0.85,xp:22,
+   dq:['Бреееейн... и борщ','Мозги закончились','Хотел мозгов — получил кулак','Ааааарх...']},
+];
+const BOSS={id:'karen',name:'КАРЕН',sprKey:null,col:'#ff00ff',sz:44,hp:600,dmg:30,spd:1.3,xp:300,
+  dq:['Я ЗВОНЮ АДВОКАТУ!!!','Вы ещё пожалеете!!!'],aq:['ГДЕ МЕНЕДЖЕР?!','Я КЛИЕНТ Я ПРАВ!','ВЕРНИТЕ ДЕНЬГИ!','ВАС ЗАСУЖУ!']};
+
+// ─── XP GEM ──────────────────────────────────────
+class XPGem {
+  constructor(x,y,val) { this.x=x; this.y=y; this.val=val; this.dead=false; this.t=0; }
+  update(dt) {
+    this.t+=dt;
+    if (!player) return;
+    const d=dist(this.x,this.y,player.x,player.y);
+    const mag=player.magnet||100;
+    if (d<mag) {
+      const ang=Math.atan2(player.y-this.y,player.x-this.x);
+      const pull=lerp(2, 8, 1-d/mag);
+      this.x+=Math.cos(ang)*pull;
+      this.y+=Math.sin(ang)*pull;
+    }
+    if (d<18) { player.gainXP(this.val); this.dead=true; burst(this.x,this.y,'#8844ff',4); }
+  }
+  draw() {
+    const sx=this.x-cam.x, sy=this.y-cam.y;
+    if (sx<-20||sy<-20||sx>C.width+20||sy>C.height+20) return;
+    const bob=Math.sin(this.t*0.005)*2;
+    ctx.fillStyle='#8844ff'; ctx.strokeStyle='#cc88ff'; ctx.lineWidth=1.5;
+    ctx.beginPath(); ctx.arc(sx,sy+bob,6,0,Math.PI*2); ctx.fill(); ctx.stroke();
+    ctx.fillStyle='rgba(180,100,255,0.5)'; ctx.beginPath(); ctx.arc(sx-1,sy+bob-2,2,0,Math.PI*2); ctx.fill();
+  }
+}
+
+// ─── PLAYER ──────────────────────────────────────
+class Player {
+  constructor(cfg) {
+    this.cfg=cfg; this.x=MW/2*TW; this.y=MH/2*TW;
+    this.hp=cfg.hp; this.maxHp=cfg.hp; this.spd=cfg.spd; this.dmg=cfg.dmg;
+    this.dir='down'; this.faceAngle=0;
+    this.xp=0; this.level=1; this.xpNext=40;
+    this.invincible=0; this.magnet=100; this.armor=0;
+    this.regen=0; this.auraDmg=0; this.critChance=0;
+    this.extraProj=0; this.atkRange=300;
+    // Auto-attack
+    this.autoAtkCd=600; this.autoAtkTimer=0;
+    // Skills
+    this.skillCd=0; this.skillCdMax=8000;
+    this.ultCd=0;   this.ultCdMax=20000;
+    this.dashCd=0;  this.dashCdMax=1500;
+    // Buffs
+    this.buffTimer=0; this.buffType='';
+    this.berserk=false; this.berserkTimer=0;
+    this.turrets=[];
+    // Sprite
+    this.spr=null; this.animT=0; this.animFrame=0;
+    this.dashVx=0; this.dashVy=0; this.dashTimer=0;
+    this.moving=false;
+  }
+
+  gainXP(amt) {
+    this.xp+=amt; score+=amt;
+    if (this.xp>=this.xpNext) {
+      this.xp-=this.xpNext; this.xpNext=Math.floor(this.xpNext*1.6);
+      this.level++;
+      addFloat(this.x,this.y-50,rnd(LEVEL_QUOTES),'#ffff00',2500);
+      burst(this.x,this.y,'#ffff00',20);
+      STATE='LEVELUP';
+      pendingUpgrades=getRandUpgrades(3);
+    }
+  }
+
+  getFaceAngle() {
+    let dx=0,dy=0;
+    if (keys.has('KeyW')||keys.has('ArrowUp'))    dy=-1;
+    if (keys.has('KeyS')||keys.has('ArrowDown'))  dy+=1;
+    if (keys.has('KeyA')||keys.has('ArrowLeft'))  dx-=1;
+    if (keys.has('KeyD')||keys.has('ArrowRight')) dx+=1;
+    if (dx!==0||dy!==0) { this.faceAngle=Math.atan2(dy,dx); return this.faceAngle; }
+    const near=findNearest(this.x,this.y,400);
+    if (near) { this.faceAngle=Math.atan2(near.y-this.y,near.x-this.x); }
+    return this.faceAngle;
+  }
+
+  update(dt) {
+    if (STATE!=='GAME') return;
+    // Cooldowns
+    if (this.invincible>0) this.invincible-=dt;
+    if (this.skillCd>0)    this.skillCd-=dt;
+    if (this.ultCd>0)      this.ultCd-=dt;
+    if (this.dashCd>0)     this.dashCd-=dt;
+    if (this.buffTimer>0)  this.buffTimer-=dt;
+    if (this.berserkTimer>0) {
+      this.berserkTimer-=dt;
+      if (this.berserkTimer<=0) { this.berserk=false; this.spd=this.cfg.spd*(1+(this.level-1)*0.05); }
+    }
+
+    // DASH (Space)
+    if (keys.has('Space') && this.dashCd<=0) {
+      this.doDash(); this.dashCd=this.dashCdMax;
+    }
+    // Skill (E)
+    if (keys.has('KeyE') && this.skillCd<=0) { this.doSkill(); this.skillCd=this.skillCdMax; }
+    // Ult (Q)
+    if (keys.has('KeyQ') && this.ultCd<=0)   { this.doUlt();   this.ultCd=this.ultCdMax; }
+
+    // Dash movement
+    if (this.dashTimer>0) {
+      this.dashTimer-=dt;
+      this.x=clamp(this.x+this.dashVx,TW,PW-TW);
+      this.y=clamp(this.y+this.dashVy,TW,PH-TW);
+      if (Math.random()<0.3) burst(this.x,this.y,this.cfg.color,2);
+    }
+
+    // Normal movement
+    let dx=0,dy=0;
+    let spd=this.spd;
+    if (this.buffTimer>0&&this.buffType==='protein') spd*=1.5;
+    if (this.berserk) spd*=1.3;
+    if (keys.has('KeyW')||keys.has('ArrowUp'))    dy-=spd;
+    if (keys.has('KeyS')||keys.has('ArrowDown'))  dy+=spd;
+    if (keys.has('KeyA')||keys.has('ArrowLeft'))  dx-=spd;
+    if (keys.has('KeyD')||keys.has('ArrowRight')) dx+=spd;
+    this.moving=(dx!==0||dy!==0);
+    if (dx!==0&&dy!==0) { dx*=0.707; dy*=0.707; }
+    const nx=this.x+dx, ny=this.y+dy, hw=12, hh=12;
+    if (!isSolid(nx-hw,this.y-hh)&&!isSolid(nx+hw,this.y-hh)&&!isSolid(nx-hw,this.y+hh)&&!isSolid(nx+hw,this.y+hh))
+      this.x=clamp(nx,TW,PW-TW);
+    if (!isSolid(this.x-hw,ny-hh)&&!isSolid(this.x+hw,ny-hh)&&!isSolid(this.x-hw,ny+hh)&&!isSolid(this.x+hw,ny+hh))
+      this.y=clamp(ny,TW,PH-TW);
+
+    // Direction
+    const fa=this.getFaceAngle();
+    this.dir=angleToDir(fa);
+
+    // Animate
+    this.animT+=dt;
+    if (this.animT>220) { this.animT=0; this.animFrame=(this.animFrame+1)%2; }
+
+    // AUTO-ATTACK
+    this.autoAtkTimer-=dt;
+    if (this.autoAtkTimer<=0) {
+      this.autoAtkTimer=this.autoAtkCd;
+      this.doAutoAttack();
+    }
+
+    // Aura damage
+    if (this.auraDmg>0) {
+      auraTimer-=dt;
+      if (auraTimer<=0) {
+        auraTimer=800;
+        for (const m of monsters) {
+          if (!m.dead && dist(this.x,this.y,m.x,m.y)<80) {
+            m.takeDmg(this.auraDmg);
+          }
+        }
+        effects.push({type:'aura',x:this.x,y:this.y,timer:400,max:400,r:80,col:'#ff8800'});
+      }
+    }
+
+    // Regen
+    if (this.regen>0) {
+      regenTimer-=dt;
+      if (regenTimer<=0) { regenTimer=1000; this.hp=Math.min(this.hp+this.regen,this.maxHp); }
+    }
+
+    // Turrets
+    this.turrets=this.turrets.filter(t=>{
+      t.timer-=dt; t.atkT-=dt;
+      if (t.atkT<=0) {
+        t.atkT=700;
+        const tgt=findNearest(t.x,t.y,250);
+        if (tgt) {
+          const ang=Math.atan2(tgt.y-t.y,tgt.x-t.x);
+          projectiles.push(new Proj(t.x,t.y,ang,5,this.dmg*0.6,'#00ff88','turret',250));
+        }
+      }
+      return t.timer>0;
+    });
+
+    // Berserk auto-punch
+    if (this.berserk&&this.cfg.id==='ginger'&&this.autoAtkTimer>0) {
+      const tgt=findNearest(this.x,this.y,100);
+      if (tgt) { tgt.takeDmg(this.dmg*0.3); }
+    }
+
+    // Camera
+    cam.x=clamp(this.x-C.width/2, 0, PW-C.width);
+    cam.y=clamp(this.y-C.height/2, 0, PH-C.height);
+  }
+
+  doAutoAttack() {
+    const tgt=findNearest(this.x,this.y,this.atkRange);
+    if (!tgt) return;
+    const ang=Math.atan2(tgt.y-this.y,tgt.x-this.x);
+    addFloat(this.x,this.y-35,rnd(this.cfg.abilQ.atk),this.cfg.color,800);
+    let dmg=this.dmg;
+    if (this.critChance>0&&Math.random()<this.critChance) {
+      dmg*=2; addFloat(this.x,this.y-55,'КРИТ! 💥','#ffff00',600);
+    }
+    if (this.cfg.id==='ginger') {
+      // Melee: punch in direction
+      const r=55;
+      const cx2=this.x+Math.cos(ang)*r, cy2=this.y+Math.sin(ang)*r;
+      effects.push({type:'punch',x:cx2,y:cy2,timer:250,max:250,col:'#ff4422'});
+      for (const m of monsters) {
+        if (!m.dead&&dist(cx2,cy2,m.x,m.y)<r*0.8) m.takeDmg(dmg);
+      }
+    } else {
+      const count=1+(this.extraProj||0);
+      const spread=Math.PI*0.1;
+      for (let i=0;i<count;i++) {
+        const a=ang+(i-(count-1)/2)*spread;
+        const col=this.cfg.id==='gpu'?'#00ff88':'#88cc44';
+        const type=this.cfg.id==='gpu'?'gpu':'toast';
+        projectiles.push(new Proj(this.x,this.y,a,5.5,dmg,col,type,this.atkRange||300));
+      }
+    }
+  }
+
+  doDash() {
+    const fa=this.getFaceAngle();
+    const spd=this.moving?1:1;
+    this.dashVx=Math.cos(fa)*8;
+    this.dashVy=Math.sin(fa)*8;
+    this.dashTimer=250;
+    this.invincible=300;
+    burst(this.x,this.y,this.cfg.color,12);
+    addFloat(this.x,this.y-30,'💨 РЫВОК!','#aaaaff',700);
+  }
+
+  doSkill() {
+    addFloat(this.x,this.y-55,rnd(this.cfg.abilQ.skill),'#00ffff',1800);
+    if (this.cfg.id==='gpu') {
+      effects.push({type:'bsod',x:this.x,y:this.y,timer:2200,max:2200,r:170});
+      for (const m of monsters) if (dist(this.x,this.y,m.x,m.y)<170) { m.stunned=2200; burst(m.x,m.y,'#0000ff',5); }
+      burst(this.x,this.y,'#0088ff',25);
+    } else if (this.cfg.id==='hipster') {
+      effects.push({type:'coffee',x:this.x,y:this.y,timer:3500,max:3500,r:140});
+      for (const m of monsters) if (dist(this.x,this.y,m.x,m.y)<140) m.slowed=3500;
+      burst(this.x,this.y,'#8b4513',20);
+    } else if (this.cfg.id==='ginger') {
+      this.buffTimer=3500; this.buffType='protein';
+      effects.push({type:'protein',x:this.x,y:this.y,timer:3500,max:3500});
+      burst(this.x,this.y,'#ff8800',20);
+    }
+  }
+
+  doUlt() {
+    addFloat(this.x,this.y-65,rnd(this.cfg.abilQ.ult),'#ffff00',2500);
+    if (this.cfg.id==='gpu') {
+      for (let i=0;i<3;i++) {
+        const a=(i/3)*Math.PI*2;
+        this.turrets.push({x:this.x+Math.cos(a)*70,y:this.y+Math.sin(a)*70,timer:6000,atkT:0});
+      }
+      burst(this.x,this.y,'#00ff88',30);
+    } else if (this.cfg.id==='hipster') {
+      effects.push({type:'vinyl',x:this.x,y:this.y,timer:5000,max:5000,r:0,ox:this.x,oy:this.y});
+      const vinylInterval=setInterval(()=>{
+        if (STATE!=='GAME') { clearInterval(vinylInterval); return; }
+        for (const m of monsters) if (!m.dead&&dist(this.x,this.y,m.x,m.y)<230) m.takeDmg(this.dmg*0.45);
+      },500);
+      setTimeout(()=>clearInterval(vinylInterval),5000);
+      burst(this.x,this.y,'#cc44ff',35);
+    } else if (this.cfg.id==='ginger') {
+      this.berserk=true; this.berserkTimer=5000;
+      effects.push({type:'berserk',x:this.x,y:this.y,timer:5000,max:5000});
+      burst(this.x,this.y,'#ff2200',45);
+    }
+  }
+
+  takeDmg(dmg) {
+    if (this.invincible>0) return;
+    if (this.dashTimer>0) return; // i-frames during dash
+    const actual=Math.max(1,dmg-(this.armor||0));
+    if (this.cfg.id==='ginger'&&Math.random()<0.2) {
+      addFloat(this.x,this.y-40,'🛡️ БЛОК!','#ff8800',800);
+      for (const m of monsters) if (dist(this.x,this.y,m.x,m.y)<65) m.takeDmg(this.dmg*0.4);
+      burst(this.x,this.y,'#ff8800',6); return;
+    }
+    this.hp-=actual;
+    this.invincible=600;
+    burst(this.x,this.y,'#ff0000',5);
+    if (this.hp<=0) { this.hp=0; STATE='GAMEOVER'; }
+  }
+
+  drawSprite(sx,sy) {
+    const sp=this.spr||(this.spr=imgs[this.cfg.sprKey]);
+    if (sp) {
+      const fw=sp.width/2, fh=sp.height/2;
+      const [srcX,srcY]=dirToFrame(this.dir,fw,fh);
+      const scale=2.2;
+      ctx.imageSmoothingEnabled=true;
+      ctx.imageSmoothingQuality='high';
+      ctx.drawImage(sp,srcX,srcY,fw,fh,sx-fw*scale/2,sy-fh*scale/2-4,fw*scale,fh*scale);
+      ctx.imageSmoothingEnabled=false;
+    } else {
+      ctx.fillStyle=this.cfg.color;
+      ctx.fillRect(sx-14,sy-22,28,38);
+      ctx.fillStyle='#ffdd88';
+      ctx.beginPath(); ctx.arc(sx,sy-28,10,0,Math.PI*2); ctx.fill();
+    }
+  }
+
+  draw() {
+    const sx=this.x-cam.x, sy=this.y-cam.y;
+    // Shadow
+    ctx.fillStyle='rgba(0,0,0,0.25)';
+    ctx.beginPath(); ctx.ellipse(sx,sy+14,14,5,0,0,Math.PI*2); ctx.fill();
+    // Glows
+    if (this.berserk) {
+      ctx.strokeStyle='#ff2200'; ctx.lineWidth=3;
+      ctx.beginPath(); ctx.arc(sx,sy,22,0,Math.PI*2); ctx.stroke();
+    }
+    if (this.buffTimer>0) {
+      ctx.strokeStyle='#ff8800'; ctx.lineWidth=2;
+      ctx.beginPath(); ctx.arc(sx,sy,20,0,Math.PI*2); ctx.stroke();
+    }
+    if (this.dashTimer>0) {
+      ctx.strokeStyle=this.cfg.color+'88'; ctx.lineWidth=4;
+      ctx.beginPath(); ctx.arc(sx,sy,18,0,Math.PI*2); ctx.stroke();
+    }
+    if (this.invincible>0&&Math.floor(this.invincible/80)%2===0) return;
+    this.drawSprite(sx,sy);
+    // Turrets
+    for (const t of this.turrets) {
+      const tx=t.x-cam.x, ty=t.y-cam.y;
+      ctx.fillStyle='#00ff88'; ctx.strokeStyle='#004422'; ctx.lineWidth=1;
+      ctx.fillRect(tx-10,ty-10,20,20); ctx.strokeRect(tx-10,ty-10,20,20);
+      ctx.fillStyle='#004422'; ctx.font='bold 8px monospace'; ctx.textAlign='center';
+      ctx.fillText('GPU',tx,ty+3);
+    }
+    // Aura ring
+    if (this.auraDmg>0) {
+      ctx.strokeStyle='rgba(255,140,0,0.2)'; ctx.lineWidth=2;
+      ctx.beginPath(); ctx.arc(sx,sy,80,0,Math.PI*2); ctx.stroke();
+    }
+  }
+}
+
+// ─── PROJECTILE ──────────────────────────────────
+class Proj {
+  constructor(x,y,ang,spd,dmg,col,type,range) {
+    this.x=x; this.y=y;
+    this.vx=Math.cos(ang)*spd; this.vy=Math.sin(ang)*spd;
+    this.dmg=dmg; this.col=col; this.type=type;
+    this.d=0; this.maxD=range; this.dead=false;
+  }
+  update() {
+    this.x+=this.vx; this.y+=this.vy;
+    this.d+=Math.hypot(this.vx,this.vy);
+    if (this.d>this.maxD||isSolid(this.x,this.y)) { this.dead=true; return; }
+    for (const m of monsters) {
+      if (!m.dead&&dist(this.x,this.y,m.x,m.y)<m.sz+6) {
+        m.takeDmg(this.dmg);
+        if (this.type==='toast') {
+          for (const m2 of monsters) if (!m2.dead&&dist(this.x,this.y,m2.x,m2.y)<55) m2.takeDmg(this.dmg*0.4);
+          effects.push({type:'toast_aoe',x:this.x,y:this.y,timer:350,max:350});
+        }
+        this.dead=true; break;
+      }
+    }
+  }
+  draw() {
+    const sx=this.x-cam.x, sy=this.y-cam.y;
+    if (this.type==='gpu') {
+      ctx.fillStyle='#00ff88'; ctx.strokeStyle='#004422'; ctx.lineWidth=1;
+      ctx.fillRect(sx-9,sy-4,18,8); ctx.strokeRect(sx-9,sy-4,18,8);
+      ctx.strokeStyle='#00cc66';
+      for (let i=0;i<3;i++) { ctx.beginPath(); ctx.moveTo(sx-5+i*5,sy-4); ctx.lineTo(sx-5+i*5,sy+4); ctx.stroke(); }
+    } else if (this.type==='toast') {
+      ctx.fillStyle='#aa8833'; ctx.fillRect(sx-6,sy-6,12,12);
+      ctx.fillStyle='#55aa22'; ctx.fillRect(sx-4,sy-4,8,8);
+    } else {
+      ctx.fillStyle=this.col;
+      ctx.beginPath(); ctx.arc(sx,sy,4,0,Math.PI*2); ctx.fill();
+    }
+  }
+}
+
+// ─── MONSTER ─────────────────────────────────────
+class Monster {
+  constructor(cfg,x,y) {
+    this.cfg=cfg; this.x=x; this.y=y;
+    this.hp=cfg.hp; this.maxHp=cfg.hp;
+    this.dmg=cfg.dmg; this.spd=cfg.spd; this.sz=cfg.sz;
+    this.col=cfg.col; this.dead=false;
+    this.stunned=0; this.slowed=0; this.atkCd=0; this.atkCdMax=1400;
+    this.wob=Math.random()*Math.PI*2; this.bossPhase=1;
+    this.spr=null; this.dir='down'; this.faceAngle=0;
+  }
+
+  update(dt) {
+    if (this.dead) return;
+    if (this.stunned>0) { this.stunned-=dt; return; }
+    if (this.slowed>0)  this.slowed-=dt;
+    if (this.atkCd>0)   this.atkCd-=dt;
+    this.wob+=dt*0.003;
+    const spd=this.slowed>0?this.spd*0.35:this.spd;
+    if (player) {
+      const dx=player.x-this.x, dy=player.y-this.y;
+      const d=Math.sqrt(dx*dx+dy*dy);
+      this.faceAngle=Math.atan2(dy,dx);
+      this.dir=angleToDir(this.faceAngle);
+      if (d>this.sz+14) {
+        const nx=this.x+(dx/d)*spd, ny=this.y+(dy/d)*spd;
+        if (!isSolid(nx,ny)) { this.x=nx; this.y=ny; }
+        else if (!isSolid(nx,this.y)) this.x=nx;
+        else if (!isSolid(this.x,ny)) this.y=ny;
+      } else if (this.atkCd<=0) {
+        player.takeDmg(this.dmg); this.atkCd=this.atkCdMax;
+        if (this.cfg.id==='karen') addFloat(this.x,this.y-50,rnd(this.cfg.aq),'#ff00ff',1200);
+      }
+      if (this.cfg.id==='karen'&&this.hp<this.maxHp*0.5&&this.bossPhase===1) {
+        this.bossPhase=2; this.spd*=1.6; this.dmg=Math.floor(this.dmg*1.4);
+        addFloat(this.x,this.y-70,'😤 КАРЕН ФАЗА 2! СУПЕРЯРОСТЬ!!!','#ff00ff',3000);
+        burst(this.x,this.y,'#ff00ff',40);
+      }
+    }
+  }
+
+  takeDmg(dmg) {
+    if (this.dead) return;
+    this.hp-=dmg;
+    burst(this.x,this.y,'#ff4444',3);
+    addFloat(this.x,this.y-18,'-'+Math.floor(dmg),'#ff4444',500);
+    if (this.hp<=0) { this.dead=true; this.onDeath(); }
+  }
+
+  onDeath() {
+    kills++;
+    if (player) player.gainXP(this.cfg.xp);
+    burst(this.x,this.y,this.col,14);
+    addFloat(this.x,this.y-40,rnd(this.cfg.dq),'#ffee44',1800);
+    if (Math.random()<0.35) addFloat(this.x,this.y-60,rnd(KILL_QUOTES),'#ffffff',1700);
+    if (kills%5===0) setTimeout(()=>{ if (STATE==='GAME') addFloat(cam.x+C.width/2,cam.y+C.height/2,rnd(MOM_JOKES),'#ff88ff',3500); },400);
+    // Drop XP gem
+    const gemVal=Math.max(1,Math.floor(this.cfg.xp*0.6));
+    gems.push(new XPGem(this.x+(Math.random()-0.5)*20,this.y+(Math.random()-0.5)*20,gemVal));
+    if (this.cfg.id==='karen') { bossAlive=false; setTimeout(()=>{ if (STATE==='GAME') STATE='WIN'; },2500); }
+  }
+
+  drawBody(sx,sy) {
+    const sp=this.spr||(this.cfg.sprKey&&(this.spr=imgs[this.cfg.sprKey]));
+    const w=this.wob;
+    const wobX=Math.sin(w)*1.5;
+    if (sp) {
+      const fw=sp.width/2, fh=sp.height/2;
+      const [srcX,srcY]=dirToFrame(this.dir,fw,fh);
+      const sc=this.cfg.id==='e1'?2.0:1.8;
+      ctx.imageSmoothingEnabled=true; ctx.imageSmoothingQuality='high';
+      ctx.drawImage(sp,srcX,srcY,fw,fh,sx+wobX-fw*sc/2,sy-fh*sc/2,fw*sc,fh*sc);
+      ctx.imageSmoothingEnabled=false;
+      return;
+    }
+    // Procedural drawing
+    ctx.fillStyle=this.stunned>0?'#8888ff':this.slowed>0?'#aa6633':this.col;
+    if (this.cfg.id==='goblin') {
+      ctx.beginPath(); ctx.arc(sx+wobX,sy,this.sz,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle='#ffaa44'; ctx.beginPath(); ctx.arc(sx+wobX,sy-this.sz*.6,this.sz*.5,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle=this.col;
+      ctx.beginPath(); ctx.arc(sx+wobX-this.sz*.8,sy-this.sz*.4,this.sz*.3,0,Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(sx+wobX+this.sz*.8,sy-this.sz*.4,this.sz*.3,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle='#ff2200';
+      ctx.beginPath(); ctx.arc(sx+wobX-4,sy-this.sz*.7,3,0,Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(sx+wobX+4,sy-this.sz*.7,3,0,Math.PI*2); ctx.fill();
+    } else if (this.cfg.id==='slime') {
+      ctx.beginPath();
+      ctx.moveTo(sx+wobX-this.sz,sy);
+      ctx.quadraticCurveTo(sx+wobX-this.sz,sy-this.sz*1.3,sx+wobX,sy-this.sz*1.5);
+      ctx.quadraticCurveTo(sx+wobX+this.sz,sy-this.sz*1.3,sx+wobX+this.sz,sy);
+      ctx.quadraticCurveTo(sx+wobX+this.sz*1.1,sy+this.sz*.5,sx+wobX,sy+this.sz*.4);
+      ctx.quadraticCurveTo(sx+wobX-this.sz*1.1,sy+this.sz*.5,sx+wobX-this.sz,sy);
+      ctx.fill();
+      ctx.fillStyle='rgba(255,255,255,.5)'; ctx.beginPath(); ctx.arc(sx+wobX-3,sy-this.sz*.5,4,0,Math.PI*2); ctx.fill();
+    } else if (this.cfg.id==='skeleton') {
+      ctx.strokeStyle=this.col; ctx.lineWidth=3;
+      ctx.beginPath(); ctx.moveTo(sx+wobX,sy-this.sz); ctx.lineTo(sx+wobX,sy+this.sz*.5); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(sx+wobX-this.sz*.8,sy-this.sz*.2); ctx.lineTo(sx+wobX+this.sz*.8,sy-this.sz*.2); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(sx+wobX,sy+this.sz*.5); ctx.lineTo(sx+wobX-this.sz*.6,sy+this.sz); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(sx+wobX,sy+this.sz*.5); ctx.lineTo(sx+wobX+this.sz*.6,sy+this.sz); ctx.stroke();
+      ctx.fillStyle=this.col; ctx.beginPath(); ctx.arc(sx+wobX,sy-this.sz,this.sz*.55,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle='#111'; ctx.beginPath(); ctx.arc(sx+wobX-4,sy-this.sz,3,0,Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(sx+wobX+4,sy-this.sz,3,0,Math.PI*2); ctx.fill();
+    } else if (this.cfg.id==='orc') {
+      ctx.beginPath(); ctx.arc(sx+wobX,sy,this.sz,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle='#ffcc88'; ctx.beginPath(); ctx.arc(sx+wobX,sy-this.sz*.7,this.sz*.65,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle='#ffffcc'; ctx.fillRect(sx+wobX-9,sy-this.sz*.25,4,12); ctx.fillRect(sx+wobX+5,sy-this.sz*.25,4,12);
+      ctx.fillStyle='#ff2200';
+      ctx.beginPath(); ctx.arc(sx+wobX-5,sy-this.sz*.85,4,0,Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(sx+wobX+5,sy-this.sz*.85,4,0,Math.PI*2); ctx.fill();
+    } else if (this.cfg.id==='zombie') {
+      ctx.beginPath(); ctx.arc(sx+wobX,sy,this.sz,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle='#88aa88'; ctx.beginPath(); ctx.arc(sx+wobX,sy-this.sz*.7,this.sz*.6,0,Math.PI*2); ctx.fill();
+      ctx.strokeStyle='#ff2200'; ctx.lineWidth=2;
+      [-7,-1,3].forEach((ox,i)=>{
+        if (i%2===0) { ctx.beginPath(); ctx.moveTo(sx+wobX+ox,sy-this.sz*.9); ctx.lineTo(sx+wobX+ox+4,sy-this.sz*.6); ctx.stroke(); }
+      });
+    } else if (this.cfg.id==='karen') {
+      const pulse=1+Math.sin(w*3)*.05;
+      ctx.fillStyle=this.bossPhase===2?'#ff00aa':'#ff00ff';
+      ctx.beginPath(); ctx.arc(sx+wobX,sy,this.sz*pulse,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle='#ffff00';
+      ctx.beginPath();
+      ctx.moveTo(sx+wobX-this.sz,sy-this.sz*.8);
+      ctx.lineTo(sx+wobX-this.sz*.4,sy-this.sz*1.9);
+      ctx.lineTo(sx+wobX,sy-this.sz*1.6);
+      ctx.lineTo(sx+wobX+this.sz*.4,sy-this.sz*1.9);
+      ctx.lineTo(sx+wobX+this.sz,sy-this.sz*.8);
+      ctx.fill();
+      ctx.fillStyle='#ffcc88'; ctx.beginPath(); ctx.arc(sx+wobX,sy-this.sz*.65,this.sz*.7,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle='#ff0000';
+      ctx.beginPath(); ctx.arc(sx+wobX-7,sy-this.sz*.75,5,0,Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(sx+wobX+7,sy-this.sz*.75,5,0,Math.PI*2); ctx.fill();
+      ctx.strokeStyle='#000'; ctx.lineWidth=3;
+      ctx.beginPath(); ctx.moveTo(sx+wobX-13,sy-this.sz*1.05); ctx.lineTo(sx+wobX-5,sy-this.sz*.9); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(sx+wobX+5,sy-this.sz*.9); ctx.lineTo(sx+wobX+13,sy-this.sz*1.05); ctx.stroke();
+      ctx.fillStyle='#ffff00'; ctx.font='bold 13px monospace'; ctx.textAlign='center';
+      ctx.fillText('КАРЕН',sx+wobX,sy+this.sz+18);
+      // Boss HP bar
+      const bw=130;
+      ctx.fillStyle='#330000'; ctx.fillRect(sx+wobX-bw/2,sy-this.sz-32,bw,9);
+      ctx.fillStyle=this.bossPhase===2?'#ff0055':'#ff00ff';
+      ctx.fillRect(sx+wobX-bw/2,sy-this.sz-32,bw*(this.hp/this.maxHp),9);
+      ctx.strokeStyle='#ff88ff'; ctx.lineWidth=1; ctx.strokeRect(sx+wobX-bw/2,sy-this.sz-32,bw,9);
+    }
+  }
+
+  draw() {
+    if (this.dead) return;
+    const sx=this.x-cam.x, sy=this.y-cam.y;
+    if (sx<-80||sy<-80||sx>C.width+80||sy>C.height+80) return;
+    ctx.fillStyle='rgba(0,0,0,0.2)';
+    ctx.beginPath(); ctx.ellipse(sx,sy+this.sz-3,this.sz*.7,4,0,0,Math.PI*2); ctx.fill();
+    if (this.stunned>0) { ctx.strokeStyle='#8888ff'; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(sx,sy-this.sz-6,8,0,Math.PI*2); ctx.stroke(); }
+    if (this.slowed>0)  { ctx.strokeStyle='#8b4513'; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(sx,sy-this.sz-6,8,0,Math.PI*2); ctx.stroke(); }
+    this.drawBody(sx,sy);
+    if (this.cfg.id!=='karen') {
+      const bw=this.sz*2;
+      ctx.fillStyle='#550000'; ctx.fillRect(sx-bw/2,sy-this.sz-11,bw,5);
+      ctx.fillStyle='#ff3333'; ctx.fillRect(sx-bw/2,sy-this.sz-11,bw*(this.hp/this.maxHp),5);
+    }
+  }
+}
+
+// ─── EFFECTS ─────────────────────────────────────
+function drawEffects() {
+  for (const e of effects) {
+    const sx=e.x-cam.x, sy=e.y-cam.y;
+    const prog=e.timer/e.max;
+    if (e.type==='bsod') {
+      ctx.fillStyle=`rgba(0,0,200,${prog*.45})`; ctx.fillRect(sx-e.r,sy-e.r,e.r*2,e.r*2);
+      ctx.strokeStyle=`rgba(100,100,255,${prog})`; ctx.lineWidth=2; ctx.strokeRect(sx-e.r,sy-e.r,e.r*2,e.r*2);
+      ctx.fillStyle=`rgba(255,255,255,${prog})`;
+      ctx.font=`${Math.floor(14+(1-prog)*6)}px monospace`; ctx.textAlign='center';
+      ctx.fillText('CRITICAL_ERROR.exe',sx,sy);
+    } else if (e.type==='coffee') {
+      ctx.fillStyle=`rgba(100,50,20,${prog*.35})`; ctx.beginPath(); ctx.arc(sx,sy,e.r,0,Math.PI*2); ctx.fill();
+    } else if (e.type==='protein') {
+      ctx.strokeStyle=`rgba(255,140,0,${prog})`; ctx.lineWidth=4;
+      ctx.beginPath(); ctx.arc(sx,sy,28+(1-prog)*25,0,Math.PI*2); ctx.stroke();
+    } else if (e.type==='vinyl') {
+      const maxR=230; e.r=Math.min(maxR,(e.r||0)+2.5);
+      const a=gameTime*.005;
+      ctx.strokeStyle=`rgba(200,100,255,${prog*.7})`; ctx.lineWidth=9;
+      ctx.beginPath(); ctx.arc(sx,sy,e.r,a,a+Math.PI*1.7); ctx.stroke();
+      ctx.strokeStyle=`rgba(255,220,100,${prog*.5})`; ctx.lineWidth=5;
+      ctx.beginPath(); ctx.arc(sx,sy,e.r*.6,-a,-a+Math.PI*1.4); ctx.stroke();
+    } else if (e.type==='punch') {
+      ctx.strokeStyle=`rgba(255,68,34,${prog})`; ctx.lineWidth=4;
+      ctx.beginPath();
+      for (let i=0;i<6;i++) { const a=(i/6)*Math.PI*2,r=18+(1-prog)*28; ctx.moveTo(sx,sy); ctx.lineTo(sx+Math.cos(a)*r,sy+Math.sin(a)*r); }
+      ctx.stroke();
+    } else if (e.type==='berserk') {
+      ctx.strokeStyle=`rgba(255,34,0,${prog*.6})`; ctx.lineWidth=5;
+      ctx.beginPath(); ctx.arc(sx,sy,28+(1-prog)*38,0,Math.PI*2); ctx.stroke();
+    } else if (e.type==='toast_aoe') {
+      ctx.fillStyle=`rgba(100,150,50,${prog*.4})`; ctx.beginPath(); ctx.arc(sx,sy,55*(2-prog),0,Math.PI*2); ctx.fill();
+    } else if (e.type==='aura') {
+      ctx.strokeStyle=`rgba(255,140,0,${prog*.6})`; ctx.lineWidth=3;
+      ctx.beginPath(); ctx.arc(sx,sy,e.r,0,Math.PI*2); ctx.stroke();
+    }
+  }
+}
+
+// ─── HUD ─────────────────────────────────────────
+function drawHUD() {
+  if (!player) return;
+  // HP
+  const hpPct=player.hp/player.maxHp;
+  ctx.fillStyle='rgba(0,0,0,.65)'; ctx.fillRect(10,10,202,18);
+  ctx.fillStyle=hpPct>.5?'#22cc44':hpPct>.25?'#ffaa00':'#ff2222';
+  ctx.fillRect(11,11,200*hpPct,16);
+  ctx.strokeStyle='#888'; ctx.lineWidth=1; ctx.strokeRect(10,10,202,18);
+  ctx.fillStyle='#fff'; ctx.font='bold 11px monospace'; ctx.textAlign='left';
+  ctx.fillText(`❤ ${player.hp}/${player.maxHp}`,14,23);
+  // XP
+  const xpPct=player.xp/player.xpNext;
+  ctx.fillStyle='rgba(0,0,0,.5)'; ctx.fillRect(10,32,202,8);
+  ctx.fillStyle='#8844ff'; ctx.fillRect(11,33,200*xpPct,6);
+  ctx.strokeStyle='#666'; ctx.strokeRect(10,32,202,8);
+  ctx.fillStyle='#ccaaff'; ctx.font='9px monospace';
+  ctx.fillText(`LVL ${player.level}  XP ${player.xp}/${player.xpNext}`,14,40);
+  // Stats
+  ctx.fillStyle='rgba(0,0,0,.55)'; ctx.fillRect(10,44,202,18);
+  ctx.fillStyle='#ffdd44'; ctx.font='bold 11px monospace';
+  ctx.fillText(`💀 ${kills}   ⭐ ${score}   ⏱ ${Math.floor(gameTime/1000)}с`,14,57);
+  // Wave
+  ctx.fillStyle='rgba(0,0,0,.5)'; ctx.fillRect(10,66,202,14);
+  ctx.fillStyle='#ff8844'; ctx.font='9px monospace';
+  ctx.fillText(`🌊 Волна ${wave}  Монстров: ${monsters.filter(m=>!m.dead).length}`,14,77);
+  // Abilities
+  drawAbilHUD();
+  // Minimap
+  drawMinimap();
+  // Boss bar
+  if (!bossSpawned) {
+    ctx.fillStyle='rgba(0,0,0,.6)'; ctx.fillRect(C.width-212,10,202,18);
+    ctx.fillStyle='#ff6600'; ctx.fillRect(C.width-211,11,200*Math.min(1,kills/50),16);
+    ctx.strokeStyle='#ff8800'; ctx.lineWidth=1; ctx.strokeRect(C.width-212,10,202,18);
+    ctx.fillStyle='#fff'; ctx.font='10px monospace'; ctx.textAlign='right';
+    ctx.fillText(`👹 Босс: ${kills}/50`,C.width-14,23);
+  } else if (bossAlive) {
+    ctx.fillStyle='#ff00ff'; ctx.font='bold 14px monospace'; ctx.textAlign='center';
+    ctx.fillText('⚠️ КАРЕН АКТИВНА ⚠️',C.width/2,20);
+  }
+  // Upgrades info (mini)
+  if (player.auraDmg>0||player.regen>0||player.extraProj>0) {
+    ctx.fillStyle='rgba(0,0,0,.5)'; ctx.fillRect(10,84,202,14);
+    ctx.fillStyle='#aaaaff'; ctx.font='8px monospace'; ctx.textAlign='left';
+    const info=[];
+    if (player.auraDmg>0) info.push(`🌀${player.auraDmg}`);
+    if (player.regen>0) info.push(`💊${player.regen}/s`);
+    if (player.extraProj>0) info.push(`🎯+${player.extraProj}`);
+    if (player.armor>0) info.push(`🛡${player.armor}`);
+    ctx.fillText(info.join(' '),14,94);
+  }
+}
+
+function drawAbilHUD() {
+  const y=C.height-70;
+  const abs=[
+    {label:'РЫВОК\n[Spc]',cd:player.dashCd,max:player.dashCdMax,col:'#aaaaff'},
+    {label:'СКИЛЛ\n[E]',  cd:player.skillCd,max:player.skillCdMax,col:'#44aaff'},
+    {label:'УЛТ\n[Q]',   cd:player.ultCd,  max:player.ultCdMax,  col:'#ffaa44'},
+  ];
+  abs.forEach((ab,i)=>{
+    const x=10+i*80, rdy=ab.cd<=0;
+    ctx.fillStyle=rdy?'rgba(0,40,0,.8)':'rgba(0,0,0,.8)';
+    ctx.strokeStyle=rdy?ab.col:'#444'; ctx.lineWidth=2;
+    ctx.fillRect(x,y,72,56); ctx.strokeRect(x,y,72,56);
+    if (!rdy) {
+      ctx.fillStyle=ab.col+'33'; ctx.fillRect(x,y+56-56*(1-ab.cd/ab.max),72,56*(1-ab.cd/ab.max));
+      ctx.fillStyle='#aaa'; ctx.font='9px monospace'; ctx.textAlign='center';
+      ctx.fillText(`${(ab.cd/1000).toFixed(1)}s`,x+36,y+34);
+    } else {
+      ctx.fillStyle=ab.col; ctx.font='bold 9px monospace'; ctx.textAlign='center';
+      ctx.fillText('READY',x+36,y+34);
+    }
+    ctx.fillStyle=rdy?'#fff':'#666'; ctx.font='9px monospace'; ctx.textAlign='center';
+    ctx.fillText(ab.label.split('\n')[0],x+36,y+15);
+    ctx.fillStyle='#aaa'; ctx.font='7px monospace';
+    ctx.fillText(ab.label.split('\n')[1],x+36,y+50);
+  });
+  ctx.fillStyle='rgba(0,0,0,.5)'; ctx.fillRect(255,y+8,200,42);
+  ctx.fillStyle='#888'; ctx.font='9px monospace'; ctx.textAlign='left';
+  ctx.fillText('WASD — движение',260,y+22);
+  ctx.fillText('Space — рывок   E — скилл   Q — ульт',260,y+36);
+  ctx.fillText('AUTO-АТАКИ сами! (Vampire Survivors)',260,y+49);
+}
+
+function drawMinimap() {
+  const mw=120,mh=120,mx2=C.width-mw-10,my2=C.height-mh-10;
+  ctx.fillStyle='rgba(0,0,0,.7)'; ctx.fillRect(mx2,my2,mw,mh);
+  ctx.strokeStyle='#555'; ctx.lineWidth=1; ctx.strokeRect(mx2,my2,mw,mh);
+  const sx2=mw/MW,sy2=mh/MH;
+  for (let ty=0;ty<MH;ty+=2) for (let tx=0;tx<MW;tx+=2) {
+    const t=tilemap[ty][tx];
+    ctx.fillStyle=t===3?'#1a5a1a':t===4?'#1a3a8a':t===0?'#2a5a2a':'#555';
+    ctx.fillRect(mx2+tx*sx2,my2+ty*sy2,sx2*2,sy2*2);
+  }
+  for (const m of monsters) {
+    if (m.dead) continue;
+    ctx.fillStyle=m.cfg.id==='karen'?'#ff00ff':'#ff2222';
+    ctx.fillRect(mx2+(m.x/PW)*mw-1,my2+(m.y/PH)*mh-1,3,3);
+  }
+  for (const g of gems) {
+    ctx.fillStyle='#8844ff';
+    ctx.fillRect(mx2+(g.x/PW)*mw,my2+(g.y/PH)*mh,2,2);
+  }
+  if (player) {
+    const px=mx2+(player.x/PW)*mw, py=my2+(player.y/PH)*mh;
+    ctx.fillStyle='#00ff88'; ctx.beginPath(); ctx.arc(px,py,3,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle='#00ff88'; ctx.lineWidth=1; ctx.strokeRect(mx2,my2,mw,mh);
+  }
+  ctx.fillStyle='#888'; ctx.font='9px monospace'; ctx.textAlign='center';
+  ctx.fillText('МИНИ-КАРТА',mx2+mw/2,my2-3);
+}
+
+// ─── LEVEL UP SCREEN ─────────────────────────────
+function drawLevelUp() {
+  ctx.fillStyle='rgba(0,0,0,.85)'; ctx.fillRect(0,0,C.width,C.height);
+  ctx.textAlign='center';
+  ctx.fillStyle='#ffff00'; ctx.font='bold 36px monospace';
+  ctx.fillText('⬆️ УРОВЕНЬ '+player.level+'! Выбери апгрейд:',C.width/2,70);
+  ctx.fillStyle='#888'; ctx.font='12px monospace';
+  ctx.fillText(rnd(LEVEL_QUOTES),C.width/2,100);
+  const cw=200,ch=260,gap=20;
+  const startX=(C.width-cw*3-gap*2)/2;
+  pendingUpgrades.forEach((upg,i)=>{
+    const cx=startX+i*(cw+gap), cy=140;
+    const hov=mx>cx&&mx<cx+cw&&my>cy&&my<cy+ch;
+    ctx.fillStyle=hov?'rgba(80,80,20,.95)':'rgba(30,30,10,.95)';
+    ctx.strokeStyle=hov?'#ffff00':'#666';
+    ctx.lineWidth=hov?3:2;
+    ctx.fillRect(cx,cy,cw,ch); ctx.strokeRect(cx,cy,cw,ch);
+    ctx.font='40px serif'; ctx.fillStyle='#fff'; ctx.textAlign='center';
+    ctx.fillText(upg.icon,cx+cw/2,cy+55);
+    ctx.fillStyle=hov?'#ffff44':'#ffffff';
+    ctx.font='bold 15px monospace'; ctx.textAlign='center';
+    ctx.fillText(upg.name,cx+cw/2,cy+85);
+    ctx.fillStyle='#cccccc'; ctx.font='11px monospace';
+    wrapText(upg.desc,cw-20,ctx).forEach((line,li)=>ctx.fillText(line,cx+cw/2,cy+108+li*16));
+    if (hov) {
+      ctx.fillStyle='#ffff00'; ctx.font='bold 12px monospace';
+      ctx.fillText('[ КЛИК для выбора ]',cx+cw/2,cy+ch-15);
+    }
+    if (hov&&mclk) {
+      upg.apply(player);
+      mclk=false;
+      STATE='GAME';
+      burst(player.x,player.y,'#ffff00',20);
+    }
+  });
+  // Skip
+  ctx.fillStyle='rgba(60,60,60,.8)'; ctx.fillRect(C.width/2-80,460,160,36);
+  ctx.strokeStyle='#666'; ctx.lineWidth=1; ctx.strokeRect(C.width/2-80,460,160,36);
+  ctx.fillStyle='#aaa'; ctx.font='12px monospace'; ctx.textAlign='center';
+  ctx.fillText('Пропустить',C.width/2,483);
+  if (mx>C.width/2-80&&mx<C.width/2+80&&my>460&&my<496&&mclk) { mclk=false; STATE='GAME'; }
+}
+
+// ─── SCREEN: TITLE ───────────────────────────────
+function drawTitle(dt) {
+  titleAnim+=dt;
+  const gr=ctx.createLinearGradient(0,0,0,C.height);
+  gr.addColorStop(0,'#0a0020'); gr.addColorStop(1,'#200010');
+  ctx.fillStyle=gr; ctx.fillRect(0,0,C.width,C.height);
+  for (let i=0;i<80;i++) {
+    const px=((i*97+titleAnim*.01*(i%5+1))%C.width);
+    const py=((i*137)%C.height);
+    ctx.fillStyle='#ffffff'; ctx.fillRect(px,py,(i%3===0)?2:1,(i%3===0)?2:1);
+  }
+  const bounce=Math.sin(titleAnim*.003)*6;
+  ctx.textAlign='center';
+  ctx.fillStyle='#880044'; ctx.font='bold 60px monospace';
+  ctx.fillText('ТРИ ДУРАКА',C.width/2+4,104+bounce);
+  const grad=ctx.createLinearGradient(0,50,0,120);
+  grad.addColorStop(0,'#ff88ff'); grad.addColorStop(.5,'#ffff00'); grad.addColorStop(1,'#ff4444');
+  ctx.fillStyle=grad; ctx.font='bold 60px monospace';
+  ctx.fillText('ТРИ ДУРАКА',C.width/2,100+bounce);
+  ctx.fillStyle='#aaffaa'; ctx.font='bold 20px monospace';
+  ctx.fillText('⚔️  PIXEL BRAWLER  v2.0  ⚔️',C.width/2,140);
+  ctx.fillStyle='#777'; ctx.font='12px monospace';
+  ctx.fillText('Убивай монстров. Собирай XP. Эволюционируй. Не тупи.',C.width/2,170);
+  ctx.fillStyle='#888'; ctx.font='11px monospace';
+  ctx.fillText('Стиль: Vampire Survivors + Brotato',C.width/2,190);
+  // Button
+  const bX=C.width/2-140,bY=230,bW=280,bH=54;
+  const hov=mx>bX&&mx<bX+bW&&my>bY&&my<bY+bH;
+  ctx.fillStyle=hov?'#00cc55':'#008833'; ctx.strokeStyle='#00ff88'; ctx.lineWidth=3;
+  ctx.fillRect(bX,bY,bW,bH); ctx.strokeRect(bX,bY,bW,bH);
+  ctx.fillStyle='#fff'; ctx.font='bold 26px monospace'; ctx.textAlign='center';
+  ctx.fillText('▶  ИГРАТЬ',C.width/2,bY+36);
+  if ((hov&&mclk)||keys.has('Enter')) { STATE='SELECT'; mclk=false; }
+  // Joke
+  const jp=6000, ji=Math.floor(titleAnim/jp)%MOM_JOKES.length;
+  ctx.globalAlpha=Math.sin((titleAnim%jp)/jp*Math.PI);
+  ctx.fillStyle='#ff88ff'; ctx.font='11px monospace'; ctx.textAlign='center';
+  ctx.fillText(MOM_JOKES[ji],C.width/2,C.height-32);
+  ctx.globalAlpha=1;
+  ctx.fillStyle='#444'; ctx.font='10px monospace';
+  ctx.fillText('AUTO-АТАКИ • XP ГЕМЫ • АПГРЕЙДЫ • БОСС КАРЕН • 🚽',C.width/2,C.height-12);
+}
+
+// ─── SCREEN: SELECT ──────────────────────────────
+function drawSelect(dt) {
+  selAnim+=dt;
+  const gr=ctx.createLinearGradient(0,0,0,C.height);
+  gr.addColorStop(0,'#0a0025'); gr.addColorStop(1,'#150010');
+  ctx.fillStyle=gr; ctx.fillRect(0,0,C.width,C.height);
+  ctx.fillStyle='#ffdd44'; ctx.font='bold 28px monospace'; ctx.textAlign='center';
+  ctx.fillText('ВЫБЕРИ ГЕРОЯ',C.width/2,44);
+  ctx.fillStyle='#888'; ctx.font='11px monospace';
+  ctx.fillText('(кликни на персонажа, затем "НАЧАТЬ")',C.width/2,62);
+  const cW=220,cH=440,cY=74,gp=20;
+  const startX=(C.width-cW*3-gp*2)/2;
+  CHARS.forEach((ch,i)=>{
+    const cX=startX+i*(cW+gp);
+    const hov=mx>cX&&mx<cX+cW&&my>cY&&my<cY+cH;
+    const sel=selectedChar&&selectedChar.id===ch.id;
+    ctx.fillStyle=sel?ch.color+'33':hov?'#ffffff11':'#00000044';
+    ctx.strokeStyle=sel?ch.color:hov?'#ffffff66':'#444';
+    ctx.lineWidth=sel?3:2;
+    ctx.fillRect(cX,cY,cW,cH); ctx.strokeRect(cX,cY,cW,cH);
+    // Only show FRONT of character (top-left quadrant of select img)
+    const im=imgs[ch.selKey];
+    const imgAreaH=170;
+    if (im&&im.width) {
+      const cropW=im.width/2, cropH=im.height/2;
+      const scale=Math.min((cW-20)/cropW, imgAreaH/cropH);
+      const dw=cropW*scale, dh=cropH*scale;
+      const bob=Math.sin(selAnim*.003+i*1.2)*4;
+      ctx.imageSmoothingEnabled=true; ctx.imageSmoothingQuality='high';
+      ctx.drawImage(im,0,0,cropW,cropH,cX+(cW-dw)/2,cY+8+bob,dw,dh);
+      ctx.imageSmoothingEnabled=false;
+    } else {
+      ctx.fillStyle=ch.color+'88'; ctx.fillRect(cX+20,cY+8,cW-40,imgAreaH);
+      ctx.fillStyle=ch.color; ctx.font='40px monospace'; ctx.textAlign='center';
+      ctx.fillText(['⚡','🎩','💪'][i],cX+cW/2,cY+8+imgAreaH/2+14);
+    }
+    // Name
+    const ny2=cY+imgAreaH+20;
+    ctx.fillStyle=ch.color; ctx.font='bold 18px monospace'; ctx.textAlign='center';
+    ctx.fillText(ch.name,cX+cW/2,ny2+12);
+    ctx.fillStyle='#aaa'; ctx.font='9px monospace';
+    ctx.fillText(ch.full,cX+cW/2,ny2+26);
+    ctx.fillStyle='#ffdd88'; ctx.font='italic 9px monospace';
+    wrapText('"'+ch.quote+'"',cW-20,ctx).forEach((l,li)=>ctx.fillText(l,cX+cW/2,ny2+44+li*13));
+    const stY=ny2+70;
+    ch.statsText.forEach((s,si)=>{ ctx.fillStyle=['#ff6666','#66ff66','#ff9966','#6699ff'][si]||'#aaa'; ctx.font='9px monospace'; ctx.textAlign='left'; ctx.fillText(s,cX+10,stY+si*14); });
+    const abY=stY+ch.statsText.length*14+6;
+    ch.abDesc.forEach((a,ai)=>{ ctx.fillStyle=['#44ff88','#44aaff','#ffaa44'][ai]; ctx.font='8px monospace'; ctx.textAlign='left'; ctx.fillText(a,cX+8,abY+ai*13); });
+    ctx.fillStyle='#cc88ff'; ctx.font='8px monospace';
+    ctx.fillText(ch.passive,cX+8,abY+ch.abDesc.length*13+8);
+    if (hov&&mclk) { selectedChar=ch; mclk=false; }
+    if (sel) { ctx.strokeStyle=ch.color; ctx.lineWidth=2; ctx.setLineDash([4,4]); ctx.strokeRect(cX+4,cY+4,cW-8,cH-8); ctx.setLineDash([]); }
+  });
+  if (selectedChar) {
+    const bW=280,bH=50,bX=C.width/2-bW/2,bY2=C.height-60;
+    const hov2=mx>bX&&mx<bX+bW&&my>bY2&&my<bY2+bH;
+    ctx.fillStyle=hov2?'#00cc55':'#008833'; ctx.strokeStyle='#00ff88'; ctx.lineWidth=3;
+    ctx.fillRect(bX,bY2,bW,bH); ctx.strokeRect(bX,bY2,bW,bH);
+    ctx.fillStyle='#fff'; ctx.font='bold 20px monospace'; ctx.textAlign='center';
+    ctx.fillText('▶ НАЧАТЬ ЗА '+selectedChar.name.toUpperCase(),C.width/2,bY2+34);
+    if ((hov2&&mclk)||keys.has('Enter')) { startGame(); mclk=false; }
+  }
+  ctx.fillStyle='#333'; ctx.strokeStyle='#666'; ctx.lineWidth=1;
+  ctx.fillRect(10,C.height-44,100,34); ctx.strokeRect(10,C.height-44,100,34);
+  ctx.fillStyle='#aaa'; ctx.font='12px monospace'; ctx.textAlign='center';
+  ctx.fillText('◀ НАЗАД',60,C.height-24);
+  if (mx>10&&mx<110&&my>C.height-44&&my<C.height-10&&mclk) { STATE='TITLE'; mclk=false; }
+}
+
+function wrapText(text,maxW,ctx2) {
+  const words=text.split(' '); const lines=[]; let cur='';
+  for (const w of words) {
+    const t=cur?cur+' '+w:w;
+    if (ctx2.measureText(t).width>maxW&&cur) { lines.push(cur); cur=w; } else cur=t;
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+// ─── GAME START ──────────────────────────────────
+function startGame() {
+  genMap();
+  player=new Player(selectedChar);
+  monsters=[]; projectiles=[]; gems=[]; effects=[]; particles=[]; floats=[];
+  kills=0; score=0; wave=1; waveTimer=0; gameTime=0;
+  bossSpawned=false; bossAlive=false; spawnTimer=0; regenTimer=0; auraTimer=0;
+  cam={x:0,y:0}; STATE='GAME';
+  setTimeout(()=>{ if (STATE==='GAME') addFloat(player.x,player.y-80,'"'+selectedChar.quote+'" — '+selectedChar.name,selectedChar.color,3000); },600);
+  setTimeout(()=>{ if (STATE==='GAME') addFloat(player.x,player.y-100,rnd(TOILET_JOKES),'#aaaaff',3000); },3500);
+}
+
+// ─── SPAWNING ─────────────────────────────────────
+function spawnMonster() {
+  if (!player) return;
+  // Enemy1 and Enemy2 appear 50% of the time, others split the rest
+  let cfg;
+  const r=Math.random();
+  if (r<0.28)      cfg=MTYPES[0]; // Братан
+  else if (r<0.55) cfg=MTYPES[1]; // Вейпер
+  else cfg=MTYPES[2+Math.floor(Math.random()*(MTYPES.length-2))];
+  // Scale with wave
+  const scaled={...cfg, hp:Math.floor(cfg.hp*(1+wave*.2)), dmg:Math.floor(cfg.dmg*(1+wave*.1)), spd:cfg.spd*(1+wave*.05)};
+  const side=Math.floor(Math.random()*4), pad=320;
+  let sx,sy;
+  if (side===0) { sx=player.x-pad-Math.random()*200; sy=player.y+(Math.random()-.5)*600; }
+  else if (side===1) { sx=player.x+pad+Math.random()*200; sy=player.y+(Math.random()-.5)*600; }
+  else if (side===2) { sx=player.x+(Math.random()-.5)*600; sy=player.y-pad-Math.random()*200; }
+  else { sx=player.x+(Math.random()-.5)*600; sy=player.y+pad+Math.random()*200; }
+  sx=clamp(sx,TW,PW-TW); sy=clamp(sy,TW,PH-TW);
+  if (!isSolid(sx,sy)) monsters.push(new Monster(scaled,sx,sy));
+}
+
+function spawnBoss() {
+  if (bossSpawned) return;
+  bossSpawned=true; bossAlive=true;
+  const sx=player.x+400, sy=player.y;
+  monsters.push(new Monster(BOSS,sx,sy));
+  addFloat(C.width/2+cam.x,C.height/2+cam.y-50,'⚠️ КАРЕН! ХОЧЕТ МЕНЕДЖЕРА!!!','#ff00ff',4500);
+  burst(sx,sy,'#ff00ff',60);
+}
+
+// ─── GAME OVER / WIN ──────────────────────────────
+function drawGameOver() {
+  ctx.fillStyle='rgba(0,0,0,.88)'; ctx.fillRect(0,0,C.width,C.height);
+  ctx.textAlign='center';
+  ctx.fillStyle='#ff2222'; ctx.font='bold 64px monospace';
+  ctx.fillText('УМЕР',C.width/2,C.height/2-80);
+  ctx.fillStyle='#ff8888'; ctx.font='18px monospace';
+  ctx.fillText('Твоя мама уже переживает. Или нет.',C.width/2,C.height/2-30);
+  ctx.fillStyle='#ffdd44'; ctx.font='14px monospace';
+  ctx.fillText(`💀 Убито: ${kills}   ⭐ Очков: ${score}   ⏱ ${Math.floor(gameTime/1000)}с`,C.width/2,C.height/2+8);
+  if (player) ctx.fillText(`📊 Уровень: ${player.level}   ❤ Финал HP: ${player.hp}/${player.maxHp}`,C.width/2,C.height/2+32);
+  btn(C.width/2-110,C.height/2+80,200,48,'🔄 СНОВА','#882200','#ff4400',()=>startGame());
+  btn(C.width/2+100,C.height/2+80,180,48,'◀ МЕНЮ','#224400','#44aa00',()=>STATE='TITLE');
+}
+
+function drawWin() {
+  ctx.fillStyle='rgba(0,0,0,.88)'; ctx.fillRect(0,0,C.width,C.height);
+  ctx.textAlign='center';
+  const cols=['#ffff00','#ff88ff','#88ffff','#ff8844','#88ff88'];
+  ctx.fillStyle=cols[Math.floor(gameTime*.002)%cols.length];
+  ctx.font='bold 52px monospace'; ctx.fillText('ПОБЕДА!!!',C.width/2,C.height/2-90);
+  ctx.fillStyle='#ffdd44'; ctx.font='16px monospace';
+  ctx.fillText('Карен повержена! Менеджера не существует!',C.width/2,C.height/2-40);
+  ctx.fillStyle='#aaffaa'; ctx.font='13px monospace';
+  ctx.fillText(`💀 ${kills} убийств  ⭐ ${score} очков  ⏱ ${Math.floor(gameTime/1000)}с`,C.width/2,C.height/2);
+  if (player) ctx.fillText(`📊 Уровень ${player.level}  ❤ ${player.hp}/${player.maxHp} HP`,C.width/2,C.height/2+26);
+  ctx.fillStyle='#ff88ff'; ctx.font='italic 12px monospace';
+  ctx.fillText('"Твоя мама гордилась бы... но скорее всего нет"',C.width/2,C.height/2+60);
+  btn(C.width/2-120,C.height/2+100,240,50,'▶ СНОВА В БОЙ','#886600','#ffdd00',()=>{ STATE='SELECT'; });
+  for (let i=0;i<2;i++) burst(Math.random()*C.width,Math.random()*C.height,cols[i%5],2);
+}
+
+function btn(x,y,w,h,label,bg,border,cb) {
+  const hov=mx>x&&mx<x+w&&my>y&&my<y+h;
+  ctx.fillStyle=hov?border:bg; ctx.strokeStyle=border; ctx.lineWidth=2;
+  ctx.fillRect(x,y,w,h); ctx.strokeRect(x,y,w,h);
+  ctx.fillStyle=hov?'#000':'#fff'; ctx.font='bold 16px monospace'; ctx.textAlign='center';
+  ctx.fillText(label,x+w/2,y+h/2+6);
+  if (hov&&mclk) { cb(); mclk=false; }
+}
+
+// ─── MAIN UPDATE ─────────────────────────────────
+function updateGame(dt) {
+  if (player) player.update(dt);
+  for (const m of monsters) m.update(dt);
+  monsters=monsters.filter(m=>!m.dead);
+  for (const p of projectiles) p.update();
+  projectiles=projectiles.filter(p=>!p.dead);
+  for (const g of gems) g.update(dt);
+  gems=gems.filter(g=>!g.dead);
+  for (const e of effects) { e.timer-=dt; if (e.type==='berserk'&&player){e.x=player.x;e.y=player.y;} if(e.type==='protein'&&player){e.x=player.x;e.y=player.y;} }
+  effects=effects.filter(e=>e.timer>0);
+  for (const p of particles) { p.x+=p.vx; p.y+=p.vy; p.vy+=0.05; p.life-=dt; }
+  particles=particles.filter(p=>p.life>0);
+  for (const ft of floats) { ft.y+=ft.vy; ft.timer-=dt; }
+  floats=floats.filter(ft=>ft.timer>0);
+  // Spawn
+  spawnTimer-=dt;
+  if (spawnTimer<=0) {
+    const cnt=Math.min(8,2+Math.floor(wave*0.5));
+    for (let i=0;i<cnt;i++) spawnMonster();
+    spawnTimer=Math.max(500,2200-wave*80);
+  }
+  waveTimer+=dt;
+  if (waveTimer>28000) {
+    wave++; waveTimer=0;
+    addFloat(player.x,player.y-90,`🌊 ВОЛНА ${wave}! Братаны злее!`,'#ff8844',2500);
+    burst(player.x,player.y,'#ff8844',20);
+  }
+  if (kills>=50&&!bossSpawned&&player) spawnBoss();
+}
+
+function drawGame() {
+  ctx.fillStyle='#1a3a1a'; ctx.fillRect(0,0,C.width,C.height);
+  drawTiles();
+  drawEffects();
+  for (const p of projectiles) p.draw();
+  for (const g of gems) g.draw();
+  monsters.sort((a,b)=>a.y-b.y);
+  for (const m of monsters) m.draw();
+  if (player) player.draw();
+  // Particles
+  for (const p of particles) {
+    ctx.globalAlpha=Math.max(0,p.life/p.ml);
+    ctx.fillStyle=p.col; ctx.fillRect(p.x-2,p.y-2,4,4);
+  }
+  ctx.globalAlpha=1;
+  // Floats
+  for (const ft of floats) {
+    const sx=ft.x-cam.x, sy=ft.y-cam.y;
+    if (sx<-250||sx>C.width+250||sy<-60||sy>C.height+60) continue;
+    ctx.globalAlpha=Math.min(1,ft.timer/350);
+    ctx.strokeStyle='#000000'; ctx.lineWidth=3;
+    ctx.fillStyle=ft.col; ctx.font='bold 13px monospace'; ctx.textAlign='center';
+    ctx.strokeText(ft.txt,sx,sy); ctx.fillText(ft.txt,sx,sy);
+  }
+  ctx.globalAlpha=1;
+  drawHUD();
+}
+
+// ─── GAME LOOP ────────────────────────────────────
+let last=0;
+function loop(ts) {
+  const dt=Math.min(50,ts-last); last=ts; gameTime+=dt;
+  ctx.clearRect(0,0,C.width,C.height);
+  if (STATE==='TITLE')    { drawTitle(dt); }
+  else if (STATE==='SELECT')   { drawSelect(dt); }
+  else if (STATE==='GAME')     { updateGame(dt); drawGame(); }
+  else if (STATE==='LEVELUP')  { drawGame(); drawLevelUp(); }
+  else if (STATE==='GAMEOVER') { drawGame(); drawGameOver(); }
+  else if (STATE==='WIN')      { drawGame(); drawWin(); }
+  mclk=false;
+  requestAnimationFrame(loop);
+}
+
+genMap();
+requestAnimationFrame(ts=>{ last=ts; requestAnimationFrame(loop); });
+</script>
+</body>
+</html>
