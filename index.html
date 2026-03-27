@@ -1475,19 +1475,25 @@ function drawParticles() {
 
 // ─── BOOT ────────────────────────────────────────
 let loadStart=Date.now();
+let forceStart=false;
+C.addEventListener('click', function loadClick() {
+  if (loaded<total) { forceStart=true; }
+});
 function waitLoad() {
   const elapsed=Date.now()-loadStart;
-  const timeout=elapsed>8000; // 8 sec max wait
-  if (loaded<total && !timeout) {
+  const canStart = loaded>=total || forceStart || elapsed>5000;
+  if (!canStart) {
     ctx.fillStyle='#000'; ctx.fillRect(0,0,C.width,C.height);
     ctx.fillStyle='#00ff88'; ctx.font='20px Courier New'; ctx.textAlign='center';
     ctx.fillText('ЗАГРУЗКА... '+loaded+'/'+total,C.width/2,C.height/2);
     ctx.fillStyle='#333'; ctx.fillRect(C.width/2-100,C.height/2+20,200,12);
     ctx.fillStyle='#00ff88';
     if (total>0) ctx.fillRect(C.width/2-100,C.height/2+20,(loaded/total)*200,12);
-    if (elapsed>3000) {
-      ctx.font='12px Courier New'; ctx.fillStyle='#666666';
-      ctx.fillText('Загрузка занимает больше времени...',C.width/2,C.height/2+50);
+    if (elapsed>2000) {
+      ctx.font='14px Courier New'; ctx.fillStyle='#ffaa44';
+      ctx.fillText('Кликни чтобы пропустить',C.width/2,C.height/2+50);
+      ctx.font='10px Courier New'; ctx.fillStyle='#666666';
+      ctx.fillText('Совет: запусти через сервер (python3 -m http.server)',C.width/2,C.height/2+70);
     }
     requestAnimationFrame(waitLoad);
     return;
