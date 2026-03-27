@@ -57,41 +57,22 @@ let pendingChest=null;
 
 // ─── SPRITES ─────────────────────────────────────
 const imgs={};
-let loaded=0, total=8;
+let loaded=0, total=0;
 
-function buildSpritesheet(img, fw, fh) {
-  const oc=document.createElement('canvas');
-  oc.width=fw*2; oc.height=fh*2;
-  const ox=oc.getContext('2d');
-  ox.drawImage(img, 0, 0, img.width, img.height, 0, 0, fw*2, fh*2);
-  const id=ox.getImageData(0,0,oc.width,oc.height), d=id.data;
-  for (let i=0;i<d.length;i+=4) {
-    if (d[i]>220 && d[i+1]>220 && d[i+2]>220) d[i+3]=0;
-  }
-  ox.putImageData(id,0,0);
-  return oc;
-}
-
-function loadImg(key, src, process) {
+function loadImg(key, src) {
+  total++;
   const im=new Image();
-  im.onload=()=>{
-    if (process==='sprite') imgs[key]=buildSpritesheet(im,24,32);
-    else if (process==='enemy') imgs[key]=buildSpritesheet(im,40,54);
-    else imgs[key]=im;
-    loaded++;
-  };
+  im.onload=()=>{ imgs[key]=im; loaded++; };
   im.onerror=()=>loaded++;
   im.src=src;
 }
 
-loadImg('p1sel','characters/player1_select.png','');
-loadImg('p2sel','characters/player2_select.png','');
-loadImg('p3sel','characters/player3_select.png','');
-loadImg('p1spr','characters/player1_sprite.png','sprite');
-loadImg('p2spr','characters/player2_sprite.png','sprite');
-loadImg('p3spr','characters/player3_sprite.png','sprite');
-loadImg('e1',   'characters/enemy1.png','enemy');
-loadImg('e2',   'characters/enemy2.png','enemy');
+loadImg('map','characters/map.png');
+const P_CHARS=['rustam','kristina','artem','ely','timur'];
+const E_CHARS=['dima','kiril','yula','vadim','Alex','alexandr'];
+const SPR_DIRS=['front','back','left','right'];
+for (const n of P_CHARS) for (const d of SPR_DIRS) loadImg(n+'_'+d,'characters/'+n+'_'+d+'.png');
+for (const n of E_CHARS) for (const d of SPR_DIRS) loadImg(n+'_'+d,'characters/'+n+'_'+d+'.png');
 
 // ─── HELPERS ─────────────────────────────────────
 const dist=(x1,y1,x2,y2)=>Math.sqrt((x2-x1)**2+(y2-y1)**2);
@@ -109,9 +90,7 @@ function dirToFrame(dir, fw, fh) {
   return { down:[0,0,fw,fh], up:[fw,0,fw,fh], left:[0,fh,fw,fh], right:[fw,fh,fw,fh] }[dir]||[0,0,fw,fh];
 }
 function isSolid(wx,wy) {
-  const tx=Math.floor(wx/TW), ty=Math.floor(wy/TW);
-  if (tx<0||ty<0||tx>=MW||ty>=MH) return true;
-  return TILE_SOLID[tilemap[ty][tx]]||false;
+  return false; // открытый мир — границы обрабатываются clamp в движении
 }
 function findNearest(x,y,maxR=9999) {
   let best=null, bd=maxR;
@@ -127,6 +106,20 @@ function burst(x,y,col,n=10) {
     const a=Math.random()*Math.PI*2, s=1+Math.random()*3;
     particles.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,col,life:500+Math.random()*300,ml:800});
   }
+}
+
+// Рисует направленный спрайт персонажа по мировым → экранным координатам
+// dir: 'down'|'up'|'left'|'right' → маппинг в 'front'|'back'|left|right
+function drawCharSprite(sprName, dir, sx, sy, tgtH) {
+  const dk = dir==='down'?'front' : dir==='up'?'back' : dir;
+  const img = imgs[sprName+'_'+dk] || imgs[sprName+'_front'];
+  if (!img) return false;
+  const sc = tgtH / img.height;
+  const dw = img.width * sc;
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(img, sx-dw/2, sy-tgtH, dw, tgtH);
+  ctx.imageSmoothingEnabled = false;
+  return true;
 }
 
 // ─── MAP ─────────────────────────────────────────
@@ -158,65 +151,58 @@ function genMap() {
   }
 }
 
-function drawTiles() {
-  ctx.imageSmoothingEnabled=false;
-  const sx=Math.floor(cam.x/TW), sy=Math.floor(cam.y/TW);
-  const ex=Math.min(MW,sx+Math.ceil(C.width/TW)+2), ey=Math.min(MH,sy+Math.ceil(C.height/TW)+2);
-  for (let ty=sy;ty<ey;ty++) for (let tx=sx;tx<ex;tx++) {
-    const t=tilemap[ty][tx];
-    const px=tx*TW-cam.x, py=ty*TW-cam.y;
-    ctx.fillStyle=TILE_COLORS[t]||'#3a7d44';
-    ctx.fillRect(px,py,TW,TW);
-    if (t===0||t===1) { ctx.strokeStyle='rgba(0,0,0,0.06)'; ctx.lineWidth=0.5; ctx.strokeRect(px,py,TW,TW); }
-    if (t===3) {
-      ctx.fillStyle='#1a3a0a'; ctx.beginPath();
-      ctx.moveTo(px+TW/2,py+4); ctx.lineTo(px+TW-4,py+TW-4); ctx.lineTo(px+4,py+TW-4); ctx.closePath(); ctx.fill();
-      ctx.fillStyle='#0d2005'; ctx.fillRect(px+TW/2-3,py+TW-8,6,8);
-    }
-    if (t===4) { ctx.fillStyle=`rgba(100,180,255,${0.2+Math.sin(gameTime*.002+tx+ty)*.1})`; ctx.fillRect(px,py,TW,TW); }
+function drawMapBg() {
+  const img = imgs['map'];
+  if (!img) {
+    ctx.fillStyle='#2a4a2a';
+    ctx.fillRect(0,0,C.width,C.height);
+    return;
   }
+  // Рендерим только видимый участок карты
+  const srcX = cam.x / PW * img.width;
+  const srcY = cam.y / PH * img.height;
+  const srcW = C.width  / PW * img.width;
+  const srcH = C.height / PH * img.height;
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(img, srcX, srcY, srcW, srcH, 0, 0, C.width, C.height);
+  ctx.imageSmoothingEnabled = false;
 }
 
 // ─── CHARS CONFIG ─────────────────────────────────
 const CHARS=[
-  { id:'gpu', name:'Вася "GPU"', color:'#00ff88', selKey:'p1sel', sprKey:'p1spr',
+  { id:'gpu', name:'Вася "GPU"', color:'#00ff88', sprName:'rustam',
     str:3, agi:8, lck:4, vit:3, int:4,
     passive:'Каждые 3 AGI: +10% скорость атаки',
     passiveDesc:'AGI/3 × +10% atk spd',
     startWeapon:'staff',
-    procedural: false,
     quote:'RTX ON, мозги OFF'
   },
-  { id:'hipster', name:'Жека "Органик"', color:'#ff8844', selKey:'p2sel', sprKey:'p2spr',
+  { id:'hipster', name:'Жека "Органик"', color:'#ff8844', sprName:'kristina',
     str:3, agi:5, lck:8, vit:3, int:3,
     passive:'Каждые 2 LCK: +10% шанс двойного XP',
     passiveDesc:'LCK/2 × +10% double XP',
     startWeapon:'fire_ring',
-    procedural: false,
     quote:'Это было круто до мейнстрима'
   },
-  { id:'ginger', name:'Бориска "СПОРТ"', color:'#ff4422', selKey:'p3sel', sprKey:'p3spr',
+  { id:'ginger', name:'Бориска "СПОРТ"', color:'#ff4422', sprName:'artem',
     str:6, agi:3, lck:2, vit:8, int:3,
     passive:'Каждые 4 VIT: +1 HP реген/сек',
     passiveDesc:'VIT/4 × +1 HP/sec regen',
     startWeapon:'dagger',
-    procedural: false,
     quote:'Это пропуск в качалку?'
   },
-  { id:'mage', name:'Маг', color:'#8866ff', selKey:null, sprKey:null,
+  { id:'mage', name:'Маг', color:'#8866ff', sprName:'ely',
     str:2, agi:3, lck:3, vit:2, int:12,
     passive:'Каждые 3 INT: +15% область оружия',
     passiveDesc:'INT/3 × +15% area',
     startWeapon:'lightning',
-    procedural: true,
     quote:'Я заклинание учил, ты просто не видел'
   },
-  { id:'adventurer', name:'Авантюрист', color:'#ffdd44', selKey:null, sprKey:null,
+  { id:'adventurer', name:'Авантюрист', color:'#ffdd44', sprName:'timur',
     str:4, agi:5, lck:7, vit:3, int:3,
     passive:'Каждые 2 LCK: +10% шанс сундука',
     passiveDesc:'LCK/2 × +10% chest drop',
     startWeapon:'holy_cross',
-    procedural: true,
     quote:'Приключения — моя фамилия'
   },
 ];
@@ -661,7 +647,6 @@ class Player {
     this.invincible=0;
     this.animT=0; this.animFrame=0; this.moving=false;
     this.regenAccum=0;
-    this.sprKey=cfg.sprKey;
   }
 
   _applyCharPassive() {
@@ -711,7 +696,8 @@ class Player {
       const choices = getSkillChoices(this);
       if (choices.length>0) {
         pendingUpgrades = choices;
-        STATE='LEVELUP';
+        STATE='LEVELUP'
+       
       }
     }
   }
@@ -880,16 +866,8 @@ class Player {
     // Flash when invincible
     if (this.invincible>0 && Math.floor(this.invincible/80)%2===1) return;
 
-    if (this.cfg.procedural || !this.sprKey || !imgs[this.sprKey]) {
+    if (!drawCharSprite(this.cfg.sprName, this.dir, sx, sy, 72)) {
       this.drawProcedural(sx,sy);
-    } else {
-      const spr=imgs[this.sprKey];
-      const fw=24, fh=32;
-      const [cx2,cy2,cw,ch]=dirToFrame(this.dir,fw,fh);
-      const frameX = this.moving ? cx2+this.animFrame*fw : cx2;
-      // Draw 2x scale
-      ctx.imageSmoothingEnabled=false;
-      ctx.drawImage(spr, frameX%spr.width, cy2, fw, fh, sx-16, sy-24, 32, 48);
     }
 
     // Weapon draw
@@ -913,6 +891,8 @@ class Player {
 }
 
 // ─── MONSTER ─────────────────────────────────────
+const ENEMY_NORMAL_SPRS = ['dima','kiril','yula'];
+const ENEMY_ELITE_SPRS  = ['vadim','Alex','alexandr'];
 let monUID = 0;
 class Monster {
   constructor(x,y,type,waveNum) {
@@ -941,7 +921,9 @@ class Monster {
     }
     this.speed=this.baseSpeed;
     // Pick sprite
-    this.sprKey = Math.random()<0.5?'e1':'e2';
+    if (type==='boss') this.sprName=null;
+    else if (type==='elite') this.sprName=rnd(ENEMY_ELITE_SPRS);
+    else this.sprName=rnd(ENEMY_NORMAL_SPRS);
     this.animFrame=0; this.animT=0;
     this.dir='down';
     this.hitFlash=0;
@@ -1021,28 +1003,13 @@ class Monster {
     const sx=this.x-cam.x, sy=this.y-cam.y;
     if (sx<-80||sy<-80||sx>C.width+80||sy>C.height+80) return;
 
-    const spr = imgs[this.sprKey];
-    const fw=40, fh=54;
     const flash = this.hitFlash>0;
-    if (spr) {
-      const [cx2,cy2,cw,ch]=dirToFrame(this.dir,fw,fh);
-      const af=this.animFrame;
-      const frameCol = af===0?0:fw;
-      const frameRow = this.dir==='up'?fh:(this.dir==='left'?fh:(this.dir==='right'?fh:0));
-      let srcX=0,srcY=0;
-      if (this.dir==='down')  { srcX=af*fw; srcY=0; }
-      else if (this.dir==='up')    { srcX=af*fw; srcY=fh; }
-      else if (this.dir==='left')  { srcX=0; srcY=fh; }
-      else if (this.dir==='right') { srcX=fw; srcY=fh; }
-      const drawSz = this.isBoss?88:(this.isElite?56:this.sz*2);
-      ctx.imageSmoothingEnabled=false;
-      if (flash) { ctx.globalAlpha=0.7; }
-      if (this.isElite) {
-        ctx.save();
-        ctx.filter='sepia(1) saturate(3) hue-rotate(20deg)';
-      }
-      ctx.drawImage(spr, srcX, srcY, fw, fh, sx-drawSz/2, sy-drawSz*0.6, drawSz, drawSz*1.2);
-      if (this.isElite) { ctx.restore(); }
+    const tgtH = this.isBoss?96 : (this.isElite?64:48);
+    if (this.sprName) {
+      if (flash) ctx.globalAlpha=0.5;
+      if (this.isElite) { ctx.save(); ctx.filter='sepia(1) saturate(3) hue-rotate(20deg)'; }
+      drawCharSprite(this.sprName, this.dir, sx, sy, tgtH);
+      if (this.isElite) ctx.restore();
       if (flash) ctx.globalAlpha=1;
     } else {
       this.drawProcedural(sx,sy);
@@ -1253,11 +1220,14 @@ function drawSelect() {
     ctx.fillStyle='rgba(0,0,0,0.3)';
     ctx.fillRect(cx2+5,cy2+5,cardW-10,portH);
 
-    if (!ch.procedural && ch.selKey && imgs[ch.selKey]) {
+    const portImg = imgs[ch.sprName+'_front'];
+    if (portImg) {
+      const sc = portH/portImg.height;
+      const dw = portImg.width*sc;
+      ctx.imageSmoothingEnabled=true;
+      ctx.drawImage(portImg, cx2+cardW/2-dw/2, cy2+5, dw, portH);
       ctx.imageSmoothingEnabled=false;
-      ctx.drawImage(imgs[ch.selKey], cx2+cardW/2-30, cy2+5+portH/2-30, 60, 60);
     } else {
-      // Procedural preview
       const pcx=cx2+cardW/2, pcy=cy2+5+portH/2;
       drawProceduralPreview(ch, pcx, pcy);
     }
@@ -1596,8 +1566,7 @@ function draw() {
   }
   if (STATE==='GAMEOVER') {
     if (player) {
-      ctx.fillStyle='#0a0a0a'; ctx.fillRect(0,0,C.width,C.height);
-      drawTiles();
+      drawMapBg();
       for (const g of gems) g.draw();
       for (const ch of chests) ch.draw();
       for (const m of monsters) m.draw();
@@ -1613,8 +1582,7 @@ function draw() {
     return;
   }
   if (STATE==='LEVELUP') {
-    ctx.fillStyle='#0a0a18'; ctx.fillRect(0,0,C.width,C.height);
-    drawTiles();
+    drawMapBg();
     for (const g of gems) g.draw();
     for (const ch of chests) ch.draw();
     for (const m of monsters) m.draw();
@@ -1625,8 +1593,7 @@ function draw() {
     return;
   }
   if (STATE==='CHEST') {
-    ctx.fillStyle='#0a0a18'; ctx.fillRect(0,0,C.width,C.height);
-    drawTiles();
+    drawMapBg();
     for (const g of gems) g.draw();
     for (const ch of chests) ch.draw();
     for (const m of monsters) m.draw();
@@ -1638,9 +1605,7 @@ function draw() {
   }
 
   // GAME
-  ctx.fillStyle='#1a2a14';
-  ctx.fillRect(0,0,C.width,C.height);
-  drawTiles();
+  drawMapBg();
   for (const g of gems) g.draw();
   for (const ch of chests) ch.draw();
   for (const m of monsters) m.draw();
