@@ -9,7 +9,7 @@ def to_b64(path):
     with open(path,'rb') as f:
         return 'data:image/png;base64,'+base64.b64encode(f.read()).decode()
 
-# Build key->path map
+# Build key->path map: map + 20 player sprites + 24 enemy character sprites = 45
 ALL_KEYS = {'map':'characters/map.png'}
 
 P_CHARS=['rustam','kristina','artem','ely','timur']
@@ -21,8 +21,8 @@ for n in P_CHARS:
 for n in E_CHARS:
     for d in DIRS:
         ALL_KEYS[f'{n}_{d}'] = f'characters/{n}_{d}.png'
-# Note: enemy/ sprite sheets excluded from standalone (too large ~10MB each).
-# They fall back to character sprites automatically in-game.
+# enemy_lvl1_bat.png is ~11MB, too large for standalone embedding.
+# In standalone, bat animation falls back to character sprites.
 
 with open('index.html','r',encoding='utf-8') as f:
     html = f.read()
@@ -45,29 +45,30 @@ for key,path in ALL_KEYS.items():
 
 inline_block = '\n'.join(lines)
 
-# Replace the sprite loading block (from loadImg('map'... to end of enemy loop)
+# Replace the sprite loading block.
+# Current index.html structure:
+#   loadImg('map','characters/map.png');
+#   const P_CHARS=...;
+#   ...
+#   loadImg('enemy_lvl1_bat','enemy/enemy_lvl1_bat.png');
 BLOCK_START = r"loadImg\('map','characters/map\.png'\);"
-BLOCK_END   = r"for \(const n of ENEMY_SPR_FILES\)[^\n]+\n"
+BLOCK_END   = r"loadImg\('enemy_lvl1_bat','enemy/enemy_lvl1_bat\.png'\);"
 pattern = BLOCK_START + r'.*?' + BLOCK_END
 m = re.search(pattern, html, re.DOTALL)
 if m:
     html = html[:m.start()] + inline_block + '\n' + html[m.end():]
     print(f'[OK] Block replaced with {ok} base64 IIFEs')
 else:
-    # Try to replace just the loadImg section up to the last loadImg call
-    print('[WARN] Primary pattern not found, trying fallback...')
-    # Fallback: find and replace just the loadImg lines
-    fallback = re.search(r"loadImg\('map'.*?for \(const n of ENEMY_SPR_FILES\)[^\n]+", html, re.DOTALL)
-    if fallback:
-        html = html[:fallback.start()] + inline_block + html[fallback.end():]
-        print(f'[OK] Fallback replace: {ok} IIFEs')
-    else:
-        print('[ERROR] Could not find sprite loading block in index.html')
+    print('[ERROR] Could not find sprite loading block in index.html')
+    print('Looking for BLOCK_START...',
+          'found' if re.search(BLOCK_START, html) else 'NOT FOUND')
+    print('Looking for BLOCK_END...',
+          'found' if re.search(BLOCK_END, html) else 'NOT FOUND')
 
-# Remove array declarations that are now baked in
-for pattern in [r'const P_CHARS=\[.*?\];\n', r'const E_CHARS=\[.*?\];\n',
-                r'const SPR_DIRS=\[.*?\];\n', r'const ENEMY_SPR_FILES=\[.*?\];\n']:
-    html = re.sub(pattern, '', html, flags=re.DOTALL)
+# Remove leftover array declarations
+for pat in [r"const P_CHARS=\[.*?\];\n", r"const E_CHARS=\[.*?\];\n",
+            r"const SPR_DIRS=\[.*?\];\n"]:
+    html = re.sub(pat, '', html, flags=re.DOTALL)
 
 out='index_standalone.html'
 with open(out,'w',encoding='utf-8') as f:

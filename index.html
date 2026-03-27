@@ -89,9 +89,8 @@ const E_CHARS=['dima','kiril','yula','vadim','Alex','alexandr'];
 const SPR_DIRS=['front','back','left','right'];
 for (const n of P_CHARS) for (const d of SPR_DIRS) loadImg(n+'_'+d,'characters/'+n+'_'+d+'.png');
 for (const n of E_CHARS) for (const d of SPR_DIRS) loadImg(n+'_'+d,'characters/'+n+'_'+d+'.png');
-// Enemy sprites from enemy/ folder
-const ENEMY_SPR_FILES=['enemy_lvl1_bat','enemy_lvl1_slime','enemy_lvl2_bone','enemy_lvl2_zombie','enemy_lvl3_ghost','enemy_lvl3_golem','enemy_lvl4_dragon'];
-for (const n of ENEMY_SPR_FILES) loadImg(n,'enemy/'+n+'.png');
+// Only load the bat sprite sheet (used for animated lvl1 enemies)
+loadImg('enemy_lvl1_bat','enemy/enemy_lvl1_bat.png');
 
 // ─── BAT SPRITE SHEET ANIMATION ──────────────────
 // Layout measured from enemy_lvl1_bat.png (2816×1536):
@@ -1475,18 +1474,25 @@ function drawParticles() {
 }
 
 // ─── BOOT ────────────────────────────────────────
+let loadStart=Date.now();
 function waitLoad() {
-  if (loaded<total) {
+  const elapsed=Date.now()-loadStart;
+  const timeout=elapsed>8000; // 8 sec max wait
+  if (loaded<total && !timeout) {
     ctx.fillStyle='#000'; ctx.fillRect(0,0,C.width,C.height);
     ctx.fillStyle='#00ff88'; ctx.font='20px Courier New'; ctx.textAlign='center';
     ctx.fillText('ЗАГРУЗКА... '+loaded+'/'+total,C.width/2,C.height/2);
     ctx.fillStyle='#333'; ctx.fillRect(C.width/2-100,C.height/2+20,200,12);
     ctx.fillStyle='#00ff88';
     if (total>0) ctx.fillRect(C.width/2-100,C.height/2+20,(loaded/total)*200,12);
+    if (elapsed>3000) {
+      ctx.font='12px Courier New'; ctx.fillStyle='#666666';
+      ctx.fillText('Загрузка занимает больше времени...',C.width/2,C.height/2+50);
+    }
     requestAnimationFrame(waitLoad);
     return;
   }
-  processBatSprite(); // remove gray bg from bat sprite sheet
+  processBatSprite();
   lastTime=performance.now();
   requestAnimationFrame(update);
 }
